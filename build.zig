@@ -9,13 +9,9 @@ pub fn build(b: *std.build.Builder) !void {
     gurl.setTarget(target);
     gurl.linkLibC();
 
-    // gurl.addIncludeDir("./s2n/api");
-    // gurl.addLibPath("./s2n/lib");
-    // gurl.linkSystemLibrary("s2n");
-
-    gurl.addIncludeDir("./wolfssl/");
-    gurl.addLibPath("./wolfssl/src/.libs");
-    gurl.linkSystemLibrary("wolfssl");
+    gurl.addIncludeDir("./BearSSL/inc");
+    gurl.addLibPath("./BearSSL/build");
+    gurl.linkSystemLibrary("bearssl");
 
     gurl.addPackagePath("network", "./zig-network/network.zig");
 

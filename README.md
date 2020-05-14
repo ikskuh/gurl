@@ -1,4 +1,4 @@
-# gurl 
+# 👧👧👧👧👩🏽 gurl👧👧 
 
 A [Gemini](https://gemini.circumlunar.space/) command line interface similar to [curl](https://curl.haxx.se/) written in [Zig](https://ziglang.org/).
 
@@ -6,7 +6,7 @@ A [Gemini](https://gemini.circumlunar.space/) command line interface similar to 
 
 - [x] Successful TLS 1.2 handshake
 - [x] Successful GET request header exchange
-- [ ] Successful body download
+- [x] Successful body download
 - [ ] header parsing
 - [ ] URL parser
 - [ ] DNS resolving
@@ -18,11 +18,11 @@ A [Gemini](https://gemini.circumlunar.space/) command line interface similar to 
 ## Dependencies
 
 - [Zig 0.6.0](https://ziglang.org/download/#release-0.6.0) or newer
-- [wolfSSL](https://www.wolfssl.com/) (provided as submodule)
+- [BearSSL](https://bearssl.org/) (provided as submodule)
 - [zig-network](https://github.com/MasterQ32/zig-network) (provided as submodule)
 
 ## Build Instructions
 
 1. Refresh submodules (`git submodule init`, `git submodule update`)
-2. Build wolfssl (`./configure && make`)
+2. Build bearssl (just run `make`)
 3. Build gurl (`zig build`)

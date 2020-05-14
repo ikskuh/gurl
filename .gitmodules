@@ -1,6 +1,6 @@
-[submodule "wolfssl"]
-	path = wolfssl
-	url = https://github.com/wolfSSL/wolfssl
 [submodule "zig-network"]
 	path = zig-network
 	url = https://github.com/MasterQ32/zig-network
+[submodule "BearSSL"]
+	path = BearSSL
+	url = https://www.bearssl.org/git/BearSSL
