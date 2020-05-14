@@ -1,4 +1,4 @@
-# 👧👧👧👧👩🏽 gurl👧👧 
+# 👧 gurl
 
 A [Gemini](https://gemini.circumlunar.space/) command line interface similar to [curl](https://curl.haxx.se/) written in [Zig](https://ziglang.org/).
 
