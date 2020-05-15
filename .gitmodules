@@ -4,3 +4,6 @@
 [submodule "BearSSL"]
 	path = BearSSL
 	url = https://www.bearssl.org/git/BearSSL
+[submodule "zig-uri"]
+	path = zig-uri
+	url = https://github.com/MasterQ32/zig-uri

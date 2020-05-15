@@ -1,6 +1,7 @@
 const std = @import("std");
 const network = @import("network");
 const ssl = @import("bearssl.zig");
+const uri = @import("uri");
 
 const c = @cImport({
     @cInclude("bearssl.h");
@@ -41,8 +42,157 @@ fn loadTrustAnchors(allocator: *std.mem.Allocator) !ssl.TrustAnchorCollection {
     defer file.close();
 
     const pem_text = try file.inStream().readAllAlloc(allocator, 1 << 20); // 1 MB
+    defer allocator.free(pem_text);
 
     return try ssl.TrustAnchorCollection.load(allocator, pem_text);
+}
+
+pub const Response = union(enum) {
+    input,
+    success: Body,
+    redirect,
+    temporaryFailure,
+    permanentFailure,
+    clientCertificateRequired,
+
+    pub const Body = struct {
+        mime: []const u8,
+        data: []const u8,
+    };
+};
+pub const ResponseType = @TagType(Response);
+
+pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorCollection, url: []const u8, memoryLimit: usize) !Response {
+    if (url.len > 1024)
+        return error.InvalidUrl;
+
+    var temp_allocator_buffer: [5000]u8 = undefined;
+    var temp_allocator = std.heap.FixedBufferAllocator.init(&temp_allocator_buffer);
+
+    const parsed_url = uri.parse(url) catch return error.InvalidUrl;
+
+    if (parsed_url.scheme == null)
+        return error.InvalidUrl;
+    if (!std.mem.eql(u8, parsed_url.scheme.?, "gemini"))
+        return error.UnsupportedScheme;
+
+    if (parsed_url.host == null)
+        return error.InvalidUrl;
+
+    const hostname_z = try std.mem.dupeZ(&temp_allocator.allocator, u8, parsed_url.host.?);
+
+    const address_list = try std.net.getAddressList(&temp_allocator.allocator, hostname_z, parsed_url.port orelse 1965);
+    defer address_list.deinit();
+
+    var socket = for (address_list.addrs) |addr| {
+        var ep = network.EndPoint.fromSocketAddress(&addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+            error.UnsupportedAddressFamily => continue,
+            else => return err,
+        };
+
+        var sock = try network.Socket.create(ep.address, .tcp);
+        errdefer sock.close();
+
+        sock.connect(ep) catch {
+            sock.close();
+            continue;
+        };
+
+        break sock;
+    } else return error.CouldNotConnect;
+
+    // std.debug.warn("socket connected to {}.\n", .{ep});
+
+    var ssl_context = ssl.Client.init(trust_anchors);
+    ssl_context.relocate();
+    try ssl_context.reset(hostname_z, false);
+    // std.debug.warn("ssl initialized.\n", .{});
+
+    var ssl_stream = ssl.Stream.init(ssl_context.getEngine(), socket.internal);
+    defer if (ssl_stream.close()) {} else |err| {
+        std.debug.warn("error when closing the stream: {}\n", .{err});
+    };
+
+    const in = ssl_stream.inStream();
+    const out = ssl_stream.outStream();
+
+    var work_buf: [1500]u8 = undefined;
+
+    const request = try std.fmt.bufPrint(&work_buf, "{}\r\n", .{url});
+
+    out.writeAll(request) catch |err| switch (err) {
+        error.X509_NOT_TRUSTED => return error.UntrustedCertificate,
+        error.X509_BAD_SERVER_NAME => return error.BadServerName,
+        else => return err,
+    };
+    try ssl_stream.flush();
+
+    const response = if (try in.readUntilDelimiterOrEof(&work_buf, '\n')) |buf|
+        buf
+    else
+        return error.InvalidResponse;
+
+    if (response.len < 3)
+        return error.InvalidResponse;
+
+    if (response[response.len - 1] != '\r') // not delimited by \r\n
+        return error.InvalidResponse;
+
+    if (!std.ascii.isDigit(response[0])) // not a number
+        return error.InvalidResponse;
+
+    if (!std.ascii.isDigit(response[1])) // not a number
+        return error.InvalidResponse;
+
+    const meta = std.mem.trim(u8, response[2..], " \t");
+    if (meta.len > 1024)
+        return error.InvalidResponse;
+
+    std.debug.warn("handshake complete: {}\n", .{response});
+
+    switch (response[0]) { // primary status code
+        '1' => { // INPUT
+            return Response{
+                .input = {},
+            };
+        },
+        '2' => { // SUCCESS
+            var mime = try std.mem.dupe(allocator, u8, meta);
+            errdefer allocator.free(mime);
+
+            var data = try in.readAllAlloc(allocator, memoryLimit);
+
+            return Response{
+                .success = Response.Body{
+                    .mime = mime,
+                    .data = data,
+                },
+            };
+        },
+        '3' => { // REDIRECT
+            return Response{
+                .redirect = {},
+            };
+        },
+        '4' => { // TEMPORARY FAILURE
+            return Response{
+                .temporaryFailure = {},
+            };
+        },
+        '5' => { // PERMANENT FAILURE
+            return Response{
+                .permanentFailure = {},
+            };
+        },
+        '6' => { // CLIENT CERTIFICATE REQUIRED
+            return Response{
+                .clientCertificateRequired = {},
+            };
+        },
+        else => return error.InvalidResponse,
+    }
+
+    unreachable;
 }
 
 pub fn main() !u8 {
@@ -53,56 +203,75 @@ pub fn main() !u8 {
     var trust_anchors = try loadTrustAnchors(generic_allocator);
     defer trust_anchors.deinit();
 
-    var ssl_context = ssl.Client.init(trust_anchors);
-    ssl_context.relocate();
-    try ssl_context.reset("gemini.circumlunar.space", false);
+    // "gemini://gemini.circumlunar.space/docs/"
 
-    std.debug.warn("ssl initialized.\n", .{});
+    var response = try requestRaw(generic_allocator, trust_anchors, "gemini://gemini.circumlunar.space/docs/", 100 * mebi_bytes);
 
-    var socket = try network.Socket.create(.ipv4, .tcp);
-    defer socket.close();
-
-    var ep = network.EndPoint{
-        .address = network.Address{
-            .ipv4 = network.Address.IPv4{
-                .value = [_]u8{ 168, 235, 111, 58 },
-            },
+    switch (response) {
+        .success => |body| {
+            try stdout.print("MIME: {0}\n", .{body.mime});
+            try stdout.writeAll(body.data);
         },
-        .port = 1965,
-    };
-    try socket.connect(ep);
-
-    std.debug.warn("socket connected to {}.\n", .{ep});
-
-    var ssl_stream = ssl.Stream.init(ssl_context.getEngine(), socket.internal);
-    defer if (ssl_stream.close()) {} else |err| {
-        std.debug.warn("error when closing the stream: {}\n", .{err});
-    };
-
-    std.debug.warn("ssl connection established.\n", .{});
-
-    const in = ssl_stream.inStream();
-    const out = ssl_stream.outStream();
-
-    const request = "gemini://gemini.circumlunar.space/docs/\r\n";
-
-    try out.writeAll(request);
-    try ssl_stream.flush();
-
-    const response = try in.readUntilDelimiterAlloc(generic_allocator, '\n', 1024);
-
-    std.debug.warn("handshake complete: {}\n", .{response});
-
-    while (true) {
-        var buffer: [1024]u8 = undefined;
-
-        var len = try in.readAll(&buffer);
-
-        try stdout.writeAll(buffer[0..len]);
-
-        if (len < buffer.len)
-            break;
+        else => try stdout.print("unimplemented response type: {}\n", .{response}),
     }
 
     return 0;
+}
+
+const kibi_bytes = 1024;
+const mebi_bytes = 1024 * 1024;
+const gibi_bytes = 1024 * 1024 * 1024;
+
+const kilo_bytes = 1000;
+const mega_bytes = 1000_000;
+const giga_bytes = 1000_000_000;
+
+// tests
+
+test "loading system certs" {
+    var file = try std.fs.cwd().openFile("/etc/ssl/cert.pem", .{ .read = true, .write = false });
+    defer file.close();
+
+    const pem_text = try file.inStream().readAllAlloc(std.testing.allocator, 1 << 20); // 1 MB
+    defer std.testing.allocator.free(pem_text);
+
+    var trust_anchors = try ssl.TrustAnchorCollection.load(std.testing.allocator, pem_text);
+    trust_anchors.deinit();
+}
+
+const TestExpection = union(enum) {
+    response: ResponseType,
+    err: anyerror,
+};
+
+fn runTestRequest(url: []const u8, expected_response: TestExpection) !void {
+    var trust_anchors = try loadTrustAnchors(std.testing.allocator);
+    defer trust_anchors.deinit();
+
+    // "gemini://gemini.circumlunar.space/docs/"
+
+    if (requestRaw(std.testing.allocator, trust_anchors, url, 100 * mebi_bytes)) |response| {
+        if (expected_response != .response) {
+            std.debug.warn("Expected error, but got {}\n", .{@as(ResponseType, response)});
+            return error.UnexpectedResponse;
+        }
+
+        if (response != expected_response.response) {
+            std.debug.warn("Expected {}, but got {}\n", .{ expected_response.response, @as(ResponseType, response) });
+            return error.UnexpectedResponse;
+        }
+    } else |err| {
+        if (expected_response != .err) {
+            std.debug.warn("Expected {}, but got error {}\n", .{ expected_response.response, err });
+            return error.UnexpectedResponse;
+        }
+        if (err != expected_response.err) {
+            std.debug.warn("Expected error {}, but got error {}\n", .{ expected_response.err, err });
+            return error.UnexpectedResponse;
+        }
+    }
+}
+
+test "torture suite (0039)" {
+    try runTestRequest("gemini://gemini.conman.org/test/torture/0039a", .{ .err = error.InvalidResponse });
 }

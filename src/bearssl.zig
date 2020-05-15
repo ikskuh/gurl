@@ -136,9 +136,6 @@ pub const TrustAnchorCollection = struct {
     items: []c.br_x509_trust_anchor,
 
     pub fn load(allocator: *std.mem.Allocator, pem_text: []const u8) !Self {
-        var trust_anchors = std.ArrayList(c.br_x509_trust_anchor).init(allocator);
-        defer trust_anchors.deinit();
-
         var objectBuffer = std.ArrayList(u8).init(allocator);
         defer objectBuffer.deinit();
 
@@ -150,6 +147,9 @@ pub const TrustAnchorCollection = struct {
         var current_obj_is_certificate = false;
 
         var arena = std.heap.ArenaAllocator.init(allocator);
+
+        var trust_anchors = std.ArrayList(c.br_x509_trust_anchor).init(&arena.allocator);
+        defer trust_anchors.deinit();
 
         var offset: usize = 0;
         while (offset < pem_text.len) {
@@ -174,10 +174,9 @@ pub const TrustAnchorCollection = struct {
                 c.BR_PEM_END_OBJ => {
                     if (current_obj_is_certificate) {
                         var certificate = c.br_x509_certificate{
-                            .data = (try std.mem.dupe(allocator, u8, objectBuffer.items)).ptr,
+                            .data = objectBuffer.items.ptr,
                             .data_len = objectBuffer.items.len,
                         };
-                        defer allocator.free(certificate.data[0..certificate.data_len]);
 
                         var trust_anchor = try convertToTrustAnchor(&arena.allocator, certificate);
 
