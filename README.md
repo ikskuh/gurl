@@ -7,9 +7,9 @@ A [Gemini](https://gemini.circumlunar.space/) command line interface similar to 
 - [x] Successful TLS 1.2 handshake
 - [x] Successful GET request header exchange
 - [x] Successful body download
-- [ ] header parsing
-- [ ] URL parser
-- [ ] DNS resolving
+- [x] header parsing
+- [x] URL parser
+- [x] DNS resolving
 - [ ] MIME parsing
 - [ ] All of the correct heading handling
   - [ ] Following redirects
