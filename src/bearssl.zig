@@ -205,24 +205,111 @@ pub const TrustAnchorCollection = struct {
     }
 };
 
+/// Custom x509 engine that uses the minimal engine and ignores missing trust.
+/// First step in TOFU direction
+const CertificateValidator = extern struct {
+    const Self = @This();
+    const class = c.br_x509_class{
+        .context_size = @sizeOf(Self),
+        .start_chain = start_chain,
+        .start_cert = start_cert,
+        .append = append,
+        .end_cert = end_cert,
+        .end_chain = end_chain,
+        .get_pkey = get_pkey,
+    };
+
+    vtable: *const c.br_x509_class = &class,
+    x509_minimal: c.br_x509_minimal_context,
+
+    fn start_chain(ctx: [*c][*c]const c.br_x509_class, server_name: [*c]const u8) callconv(.C) void {
+        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
+        // std.debug.warn("start_chain({0}, {1})\n", .{
+        //     ctx,
+        //     std.mem.spanZ(server_name),
+        // });
+        self.x509_minimal.vtable.?.*.start_chain.?(&self.x509_minimal.vtable, server_name);
+    }
+
+    fn start_cert(ctx: [*c][*c]const c.br_x509_class, length: u32) callconv(.C) void {
+        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
+        // std.debug.warn("start_cert({0}, {1})\n", .{
+        //     ctx,
+        //     length,
+        // });
+        self.x509_minimal.vtable.?.*.start_cert.?(&self.x509_minimal.vtable, length);
+    }
+
+    fn append(ctx: [*c][*c]const c.br_x509_class, buf: [*c]const u8, len: usize) callconv(.C) void {
+        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
+        // std.debug.warn("append({0}, {1}, {2})\n", .{
+        //     ctx,
+        //     buf,
+        //     len,
+        // });
+        self.x509_minimal.vtable.?.*.append.?(&self.x509_minimal.vtable, buf, len);
+    }
+
+    fn end_cert(ctx: [*c][*c]const c.br_x509_class) callconv(.C) void {
+        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
+        // std.debug.warn("end_cert({})\n", .{
+        //     ctx,
+        // });
+        self.x509_minimal.vtable.?.*.end_cert.?(&self.x509_minimal.vtable);
+    }
+
+    fn end_chain(ctx: [*c][*c]const c.br_x509_class) callconv(.C) c_uint {
+        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
+        const err = self.x509_minimal.vtable.?.*.end_chain.?(&self.x509_minimal.vtable);
+        // std.debug.warn("end_chain({}) → {}\n", .{
+        //     ctx,
+        //     err,
+        // });
+        if (err == c.BR_ERR_X509_NOT_TRUSTED) {
+            // FUCK THIS!
+            // TODO: This should'nt be done actually, but we can override the trust chain with this and just return the
+            // pubkey anyways :D
+            return 0;
+        }
+
+        return err;
+    }
+
+    fn get_pkey(ctx: [*c]const [*c]const c.br_x509_class, usages: [*c]c_uint) callconv(.C) [*c]const c.br_x509_pkey {
+        const self = @fieldParentPtr(Self, "vtable", @ptrCast(*const *const c.br_x509_class, ctx));
+
+        const pkey = self.x509_minimal.vtable.?.*.get_pkey.?(&self.x509_minimal.vtable, usages);
+        // std.debug.warn("get_pkey({}, {}) → {}\n", .{
+        //     ctx,
+        //     usages,
+        //     pkey,
+        // });
+        return pkey;
+    }
+};
+
 pub const Client = struct {
     const Self = @This();
 
     client: c.br_ssl_client_context,
-    x509: c.br_x509_minimal_context,
+    x509_custom: CertificateValidator,
     iobuf: [c.BR_SSL_BUFSIZE_BIDI]u8,
 
     pub fn init(tac: TrustAnchorCollection) Self {
         var ctx = Self{
             .client = undefined,
-            .x509 = undefined,
+            .x509_custom = .{
+                .x509_minimal = undefined,
+            },
             .iobuf = undefined,
         };
-        c.br_ssl_client_init_full(&ctx.client, &ctx.x509, tac.items.ptr, tac.items.len);
+        c.br_ssl_client_init_full(&ctx.client, &ctx.x509_custom.x509_minimal, tac.items.ptr, tac.items.len);
+
         return ctx;
     }
 
     pub fn relocate(self: *Self) void {
+        c.br_ssl_engine_set_x509(&self.client.eng, @ptrCast([*c][*c]const c.br_x509_class, &self.x509_custom.vtable));
         c.br_ssl_engine_set_buffer(&self.client.eng, &self.iobuf, self.iobuf.len, 1);
     }
 

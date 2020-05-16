@@ -48,12 +48,24 @@ fn loadTrustAnchors(allocator: *std.mem.Allocator) !ssl.TrustAnchorCollection {
 }
 
 pub const Response = union(enum) {
+    const Self = @This();
+
     input,
     success: Body,
     redirect,
     temporaryFailure,
     permanentFailure,
     clientCertificateRequired,
+
+    fn free(self: Self, allocator: *std.mem.Allocator) void {
+        switch (self) {
+            .success => |body| {
+                allocator.free(body.mime);
+                allocator.free(body.data);
+            },
+            else => {},
+        }
+    }
 
     pub const Body = struct {
         mime: []const u8,
@@ -189,7 +201,7 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
                 .clientCertificateRequired = {},
             };
         },
-        else => return error.InvalidResponse,
+        else => return error.UnknownStatusCode,
     }
 
     unreachable;
@@ -204,8 +216,9 @@ pub fn main() !u8 {
     defer trust_anchors.deinit();
 
     // "gemini://gemini.circumlunar.space/docs/"
+    const request_uri = "gemini://gemini.conman.org/test/redirhell6";
 
-    var response = try requestRaw(generic_allocator, trust_anchors, "gemini://gemini.circumlunar.space/docs/", 100 * mebi_bytes);
+    var response = try requestRaw(generic_allocator, trust_anchors, request_uri, 100 * mebi_bytes);
 
     switch (response) {
         .success => |body| {
@@ -248,9 +261,9 @@ fn runTestRequest(url: []const u8, expected_response: TestExpection) !void {
     var trust_anchors = try loadTrustAnchors(std.testing.allocator);
     defer trust_anchors.deinit();
 
-    // "gemini://gemini.circumlunar.space/docs/"
-
     if (requestRaw(std.testing.allocator, trust_anchors, url, 100 * mebi_bytes)) |response| {
+        defer response.free(std.testing.allocator);
+
         if (expected_response != .response) {
             std.debug.warn("Expected error, but got {}\n", .{@as(ResponseType, response)});
             return error.UnexpectedResponse;
@@ -272,6 +285,67 @@ fn runTestRequest(url: []const u8, expected_response: TestExpection) !void {
     }
 }
 
+// Redirect-continous temporary redirects
+test "torture suite (0022)" {
+    try runTestRequest("gemini://gemini.conman.org/test/redirhell/", .{ .response = .redirect });
+}
+
+// Redirect-continous permanent redirects
+test "torture suite (0023)" {
+    try runTestRequest("gemini://gemini.conman.org/test/redirhell2/", .{ .response = .redirect });
+}
+
+// Redirect-continous random temporary or permanent redirects
+test "torture suite (0024)" {
+    try runTestRequest("gemini://gemini.conman.org/test/redirhell3/", .{ .response = .redirect });
+}
+
+// Redirect-continous temporary redirects to itself
+test "torture suite (0025)" {
+    try runTestRequest("gemini://gemini.conman.org/test/redirhell4", .{ .response = .redirect });
+}
+
+// Redirect-continous permanent redirects to itself
+test "torture suite (0026)" {
+    try runTestRequest("gemini://gemini.conman.org/test/redirhell5", .{ .response = .redirect });
+}
+
+// Redirect-to a non-gemini link
+test "torture suite (0027)" {
+    try runTestRequest("gemini://gemini.conman.org/test/redirhell6", .{ .response = .redirect });
+}
+
+// Status-undefined status code
+test "torture suite (0034)" {
+    try runTestRequest("gemini://gemini.conman.org/test/torture/0034a", .{ .err = error.UnknownStatusCode });
+}
+
+// Status-undefined success status code
+test "torture suite (0035)" {
+    try runTestRequest("gemini://gemini.conman.org/test/torture/0035a", .{ .response = .success });
+}
+
+// Status-undefined redirect status code
+test "torture suite (0036)" {
+    try runTestRequest("gemini://gemini.conman.org/test/torture/0036a", .{ .response = .redirect });
+}
+
+// Status-undefined temporary status code
+test "torture suite (0037)" {
+    try runTestRequest("gemini://gemini.conman.org/test/torture/0037a", .{ .response = .temporaryFailure });
+}
+
+// Status-undefined permanent status code
+test "torture suite (0038)" {
+    try runTestRequest("gemini://gemini.conman.org/test/torture/0038a", .{ .response = .permanentFailure });
+}
+
+// Status-one digit status code
 test "torture suite (0039)" {
     try runTestRequest("gemini://gemini.conman.org/test/torture/0039a", .{ .err = error.InvalidResponse });
+}
+
+// Status-complete blank line
+test "torture suite (0040)" {
+    try runTestRequest("gemini://gemini.conman.org/test/torture/0040a", .{ .err = error.InvalidResponse });
 }
