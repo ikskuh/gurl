@@ -7,6 +7,9 @@ const c = @cImport({
     @cInclude("bearssl.h");
 });
 
+// gemini://gemini.circumlunar.space/docs/spec-spec.txt
+// gemini://gemini.conman.org/test/torture/0000
+
 // /*
 // * Check whether we closed properly or not. If the engine is
 // * closed, then its error status allows to distinguish between
@@ -50,26 +53,80 @@ fn loadTrustAnchors(allocator: *std.mem.Allocator) !ssl.TrustAnchorCollection {
 pub const Response = union(enum) {
     const Self = @This();
 
-    input,
+    input: Input,
     success: Body,
-    redirect,
-    temporaryFailure,
-    permanentFailure,
-    clientCertificateRequired,
+    redirect: Redirect,
+    temporaryFailure: Failure,
+    permanentFailure: Failure,
+    clientCertificateRequired: CertificateAction,
 
     fn free(self: Self, allocator: *std.mem.Allocator) void {
         switch (self) {
+            .input => |input| {
+                allocator.free(input.prompt);
+            },
+            .redirect => |redir| {
+                allocator.free(redir.target);
+            },
             .success => |body| {
                 allocator.free(body.mime);
                 allocator.free(body.data);
             },
-            else => {},
+            .temporaryFailure, .permanentFailure => |fail| {
+                allocator.free(fail.message);
+            },
+            .clientCertificateRequired => |cert| {
+                allocator.free(cert.message);
+            },
         }
     }
+
+    pub const Input = struct {
+        prompt: []const u8,
+    };
 
     pub const Body = struct {
         mime: []const u8,
         data: []const u8,
+        isEndOfClientCertificateSession: bool,
+    };
+
+    pub const Redirect = struct {
+        pub const Type = enum { permanent, temporary };
+
+        target: []const u8,
+        type: Type,
+    };
+
+    pub const Failure = struct {
+        pub const Type = enum {
+            unspecified,
+            serverUnavailable,
+            cgiError,
+            proxyError,
+            slowDown,
+            notFound,
+            gone,
+            proxyRequestRefused,
+            badRequest,
+        };
+
+        type: Type,
+        message: []const u8,
+    };
+
+    pub const CertificateAction = struct {
+        pub const Type = enum {
+            unspecified,
+            transientCertificateRequested,
+            authorisedCertificateRequired,
+            certificateNotAccepted,
+            futureCertificateRejected,
+            expiredCertificateRejected,
+        };
+
+        type: Type,
+        message: []const u8,
     };
 };
 pub const ResponseType = @TagType(Response);
@@ -156,16 +213,21 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
     if (!std.ascii.isDigit(response[1])) // not a number
         return error.InvalidResponse;
 
-    const meta = std.mem.trim(u8, response[2..], " \t");
+    const meta = std.mem.trim(u8, response[2..], " \t\r\n");
     if (meta.len > 1024)
         return error.InvalidResponse;
 
-    std.debug.warn("handshake complete: {}\n", .{response});
+    // std.debug.warn("handshake complete: {}\n", .{response});
 
     switch (response[0]) { // primary status code
         '1' => { // INPUT
+            var prompt = try std.mem.dupe(allocator, u8, meta);
+            errdefer allocator.free(prompt);
+
             return Response{
-                .input = {},
+                .input = Response.Input{
+                    .prompt = prompt,
+                },
             };
         },
         '2' => { // SUCCESS
@@ -178,27 +240,74 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
                 .success = Response.Body{
                     .mime = mime,
                     .data = data,
+                    .isEndOfClientCertificateSession = (response[1] == '1'), // check for 21
                 },
             };
         },
         '3' => { // REDIRECT
+            var target = try std.mem.dupe(allocator, u8, meta);
+            errdefer allocator.free(target);
+
             return Response{
-                .redirect = {},
+                .redirect = Response.Redirect{
+                    .target = target,
+                    .type = if (response[1] == '1')
+                        Response.Redirect.Type.permanent
+                    else
+                        Response.Redirect.Type.temporary,
+                },
             };
         },
         '4' => { // TEMPORARY FAILURE
+            var message = try std.mem.dupe(allocator, u8, meta);
+            errdefer allocator.free(message);
+
             return Response{
-                .temporaryFailure = {},
+                .temporaryFailure = Response.Failure{
+                    .type = switch (response[1]) {
+                        '1' => Response.Failure.Type.serverUnavailable,
+                        '2' => Response.Failure.Type.cgiError,
+                        '3' => Response.Failure.Type.proxyError,
+                        '4' => Response.Failure.Type.slowDown,
+                        else => Response.Failure.Type.unspecified,
+                    },
+                    .message = message,
+                },
             };
         },
         '5' => { // PERMANENT FAILURE
+            var message = try std.mem.dupe(allocator, u8, meta);
+            errdefer allocator.free(message);
+
             return Response{
-                .permanentFailure = {},
+                .permanentFailure = Response.Failure{
+                    .type = switch (response[1]) {
+                        '1' => Response.Failure.Type.notFound,
+                        '2' => Response.Failure.Type.gone,
+                        '3' => Response.Failure.Type.proxyRequestRefused,
+                        '4' => Response.Failure.Type.badRequest,
+                        else => Response.Failure.Type.unspecified,
+                    },
+                    .message = message,
+                },
             };
         },
         '6' => { // CLIENT CERTIFICATE REQUIRED
+            var message = try std.mem.dupe(allocator, u8, meta);
+            errdefer allocator.free(message);
+
             return Response{
-                .clientCertificateRequired = {},
+                .clientCertificateRequired = Response.CertificateAction{
+                    .type = switch (response[1]) {
+                        '1' => Response.CertificateAction.Type.transientCertificateRequested,
+                        '2' => Response.CertificateAction.Type.authorisedCertificateRequired,
+                        '3' => Response.CertificateAction.Type.certificateNotAccepted,
+                        '4' => Response.CertificateAction.Type.futureCertificateRejected,
+                        '5' => Response.CertificateAction.Type.expiredCertificateRejected,
+                        else => Response.CertificateAction.Type.unspecified,
+                    },
+                    .message = message,
+                },
             };
         },
         else => return error.UnknownStatusCode,
@@ -215,8 +324,12 @@ pub fn main() !u8 {
     var trust_anchors = try loadTrustAnchors(generic_allocator);
     defer trust_anchors.deinit();
 
+    // TODO:
+    // - "gemini://heavysquare.com/" does not send an end-of-stream?!
+    // - ""gemini://typed-hole.org/topkek" does not send an end-of-stream?!
+
     // "gemini://gemini.circumlunar.space/docs/"
-    const request_uri = "gemini://gemini.conman.org/test/redirhell6";
+    const request_uri = "gemini://mozz.us/tpokek";
 
     var response = try requestRaw(generic_allocator, trust_anchors, request_uri, 100 * mebi_bytes);
 
@@ -283,6 +396,22 @@ fn runTestRequest(url: []const u8, expected_response: TestExpection) !void {
             return error.UnexpectedResponse;
         }
     }
+}
+
+test "10 INPUT: query gus" {
+    try runTestRequest("gemini://gus.guru/search", .{ .response = .input });
+}
+
+test "51 PERMANENT FAILURE: query mozz.us" {
+    try runTestRequest("gemini://mozz.us/topkek", .{ .response = .permanentFailure });
+}
+
+// Run test suite against conmans torture suit
+//
+
+// Index page
+test "torture suite (0000)" {
+    try runTestRequest("gemini://gemini.conman.org/test/torture/0000", .{ .response = .success });
 }
 
 // Redirect-continous temporary redirects
