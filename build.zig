@@ -13,23 +13,23 @@ pub fn build(b: *std.build.Builder) !void {
     const gurl_test = b.addTest("src/main.zig");
 
     for ([_]*std.build.LibExeObjStep{ gurl, gurl_test }) |module| {
-        module.setBuildMode(mode);
         module.setTarget(target);
+        module.setBuildMode(mode);
         module.linkLibC();
 
-        addBearSSL(module);
+        addBearSSL(module, target);
 
         module.addPackagePath("network", "./zig-network/network.zig");
         module.addPackagePath("uri", "./zig-uri/uri.zig");
         module.addPackagePath("args", "./zig-args/args.zig");
     }
 
+    gurl.install();
+
     const gurl_exec = gurl.run();
     gurl_exec.addArgs(&[_][]const u8{
         "gemini://gemini.circumlunar.space/",
     });
-
-    gurl.install();
 
     const run_step = b.step("run", "Runs gurl with gemini://gemini.circumlunar.space/");
     run_step.dependOn(&gurl_exec.step);
@@ -38,7 +38,7 @@ pub fn build(b: *std.build.Builder) !void {
     test_step.dependOn(&gurl_test.step);
 }
 
-fn addBearSSL(module: *std.build.LibExeObjStep) void {
+fn addBearSSL(module: *std.build.LibExeObjStep, target: std.zig.CrossTarget) void {
     module.addIncludeDir("./BearSSL/inc");
     module.addIncludeDir("./BearSSL/src");
 
@@ -46,6 +46,10 @@ fn addBearSSL(module: *std.build.LibExeObjStep) void {
         module.addCSourceFile(srcfile, &[_][]const u8{
             "-Wall",
         });
+    }
+
+    if (target.isWindows()) {
+        module.linkSystemLibrary("advapi32");
     }
 }
 
