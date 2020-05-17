@@ -14,11 +14,14 @@ A [Gemini](https://gemini.circumlunar.space/) command line interface similar to 
 - [ ] All of the correct heading handling
   - [ ] Following redirects
   - [ ] …
-- [ ] TOFU (trust on first use) for SSL connections
+- [x] TOFU (trust on first use) for SSL connections
 - [ ] Client certificates
   - [ ] temporary cert
   - [ ] permanent cert
-- [ ] Use [XDG directories](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html)
+- [x] Use [XDG directories](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html)
+- [ ] Implement windows port
+  - [ ] Port `zig-network` to windows
+  - [ ] Implement correct config directory locating for windows
 
 ## Dependencies
 
