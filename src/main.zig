@@ -4,13 +4,93 @@ const ssl = @import("bearssl.zig");
 const uri = @import("uri");
 const args_parse = @import("args");
 
+const app_name = "gurl";
+
 const TrustLevel = enum {
     all,
     ca,
+    tofu,
 };
 
 pub fn main() !u8 {
+    const stdout = std.io.getStdOut().outStream();
+    const stderr = std.io.getStdErr().outStream();
+    const stdin = std.io.getStdIn().inStream();
+
     const generic_allocator = std.heap.page_allocator; // THIS IS INEFFICIENT AS FUCK
+
+    var path_arena = std.heap.ArenaAllocator.init(generic_allocator);
+    defer path_arena.deinit();
+
+    var config_root = switch (std.builtin.os.tag) {
+        // Use %APPDATA%  on windows
+        .windows => @compileError("not supported yet"),
+        else => std.process.getEnvVarOwned(&path_arena.allocator, "XDG_CONFIG_HOME") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => blk: {
+                const home_dir = std.process.getEnvVarOwned(&path_arena.allocator, "HOME") catch {
+                    try stderr.writeAll("Failed to get $HOME variable!\n");
+                    return 1;
+                };
+
+                break :blk try std.fs.path.join(&path_arena.allocator, &[_][]const u8{ home_dir, ".config" });
+            },
+            else => return err,
+        },
+    };
+
+    const app_config_file_name = try std.fs.path.join(&path_arena.allocator, &[_][]const u8{ config_root, app_name, "config.json" });
+
+    const app_trust_store_dir = try std.fs.path.join(&path_arena.allocator, &[_][]const u8{ config_root, app_name, "trust-store" });
+
+    var app_trust_store: ?std.fs.Dir = std.fs.cwd().openDir(app_trust_store_dir, .{ .access_sub_paths = true, .iterate = true }) catch |open_dir_err| switch (open_dir_err) {
+        error.FileNotFound => blk: {
+            var backing_buffer: [10]u8 = undefined;
+
+            const create_dir = while (true) {
+                try stderr.print("Trust store directory {} not found. Do you want to create it? [Y/N] ", .{
+                    app_trust_store_dir,
+                });
+
+                const answer = if (try stdin.readUntilDelimiterOrEof(&backing_buffer, '\n')) |a|
+                    a
+                else {
+                    break :blk null;
+                };
+
+                if (std.mem.eql(u8, answer, "Y") or std.mem.eql(u8, answer, "y")) {
+                    break true;
+                }
+                if (std.mem.eql(u8, answer, "N") or std.mem.eql(u8, answer, "n")) {
+                    break false;
+                }
+            } else unreachable;
+
+            if (create_dir) {
+                const dir = std.fs.cwd().makeOpenPath(app_trust_store_dir, .{ .access_sub_paths = true, .iterate = true }) catch |err| {
+                    try stderr.print("Could not create directory {}: {}\n", .{ app_trust_store_dir, err });
+                    return 1;
+                };
+
+                break :blk dir;
+            } else {
+                break :blk null;
+            }
+        },
+        else => {
+            try stderr.print("Could not access {}: {}\n", .{ app_trust_store_dir, open_dir_err });
+            return 1;
+        },
+    };
+    defer if (app_trust_store) |*dir| {
+        dir.close();
+    };
+
+    if (app_trust_store != null) {
+        std.debug.warn("trust store: \"{}\"\n", .{app_trust_store_dir});
+    } else {
+        std.debug.warn("trust store: none\n", .{});
+    }
+    std.debug.warn("config file: \"{}\"\n", .{app_config_file_name});
 
     var cli = try args_parse.parseForCurrentProcess(struct {
         @"remote-name": bool = false,
@@ -18,6 +98,8 @@ pub fn main() !u8 {
         help: bool = false,
         trust: TrustLevel = .ca,
         @"trust-anchor": []const u8 = "/etc/ssl/cert.pem",
+        @"trust-store": ?[]const u8 = null,
+        @"accept-host": bool = false,
         @"ignore-hostname-mismatch": bool = false,
         @"force-binary-on-stdout": bool = false,
 
@@ -26,12 +108,10 @@ pub fn main() !u8 {
             .o = "output",
             .h = "help",
             .t = "trust",
+            .a = "accept-host",
         };
     }, generic_allocator);
     defer cli.deinit();
-
-    const stdout = std.io.getStdOut().outStream();
-    const stderr = std.io.getStdErr().outStream();
 
     if (cli.options.help or cli.positionals.len != 1) {
         try stderr.print(
@@ -43,13 +123,21 @@ pub fn main() !u8 {
         return if (cli.options.help) @as(u8, 0) else 1;
     }
 
+    const parsed_url = uri.parse(cli.positionals[0]) catch {
+        try stderr.print("{} is not a valid URL!\n", .{cli.positionals[0]});
+        return 1;
+    };
+    if (parsed_url.host == null) {
+        try stderr.writeAll("The url does not contain a host name!\n");
+        return 1;
+    }
+
+    // Check for remote name option
     if (cli.options.@"remote-name") {
         if (cli.options.output != null) {
             try stderr.writeAll("--remote-name and --output are not allowed to be used both. Chose one!\n");
             return 1;
         }
-
-        const parsed_url = try uri.parse(cli.positionals[0]);
 
         const file_name = std.fs.path.basename(parsed_url.path.?);
 
@@ -59,6 +147,11 @@ pub fn main() !u8 {
         }
 
         cli.options.output = file_name;
+    }
+
+    if (cli.options.@"accept-host" and app_trust_store == null) {
+        try stderr.writeAll("--accept-host cannot store server public key: trust store does not exist.\n");
+        return 1;
     }
 
     var trust_anchors = ssl.TrustAnchorCollection.init(generic_allocator);
@@ -78,13 +171,45 @@ pub fn main() !u8 {
     // - "gemini://heavysquare.com/" does not send an end-of-stream?!
     // - ""gemini://typed-hole.org/topkek" does not send an end-of-stream?!
 
-    const options = RequestOptions{
-        .memory_limit = 100 * mebi_bytes,
-        .ignore_untrusted_cert = (cli.options.trust == .all),
-        .ignore_hostname_mismatch = cli.options.@"ignore-hostname-mismatch",
+    var known_certificate_verification: ?RequestVerification = null;
+    defer if (known_certificate_verification) |v| {
+        // we know that it's always a public_key for TOFU
+        v.public_key.deinit();
     };
 
-    var response = requestRaw(generic_allocator, trust_anchors, cli.positionals[0], options) catch |err| switch (err) {
+    if (app_trust_store) |dir| {
+        if (dir.openFile(parsed_url.host.?, .{ .read = true, .write = false })) |file| {
+            defer file.close();
+
+            known_certificate_verification = RequestVerification{
+                .public_key = try parsePublicKeyFile(generic_allocator, file),
+            };
+        } else |err| {
+            switch (err) {
+                error.FileNotFound => {}, // ignore missing file, we just don't know the server yet
+                else => return err,
+            }
+        }
+    }
+
+    const options = RequestOptions{
+        .memory_limit = 100 * mebi_bytes,
+        .verification = switch (cli.options.trust) {
+            // no verification for
+            .all => RequestVerification{ .none = {} },
+
+            // use known_certificate_verification when possible
+            .ca => known_certificate_verification orelse RequestVerification{ .trust_anchor = trust_anchors },
+            .tofu => known_certificate_verification orelse RequestVerification{ .none = {} },
+        },
+    };
+
+    var response = requestRaw(generic_allocator, cli.positionals[0], options) catch |err| switch (err) {
+        error.MissingAuthority => {
+            try stderr.writeAll("The url does not contain a host name!\n");
+            return 1;
+        },
+
         error.UnsupportedScheme => {
             try stderr.writeAll("The url scheme is not supported!\n");
             return 1;
@@ -104,7 +229,56 @@ pub fn main() !u8 {
     };
     defer response.free(generic_allocator);
 
-    switch (response) {
+    // Add server to trust store if requested
+    if (cli.options.@"accept-host") {
+
+        // app_trust_store is not null, we verified this above!
+        // parsed_url.host is not null, we already used it for requesting
+        var file = app_trust_store.?.createFile(parsed_url.host.?, .{ .exclusive = true }) catch |create_file_err| switch (create_file_err) {
+            error.PathAlreadyExists => {
+                // TODO: Verify here that the key didn't actually change between
+                // two --accept-host calls. This is unlikely as we already accepted the server
+                try stderr.writeAll("The server public key is already in the trust store!\n");
+                return 1;
+            },
+            else => return create_file_err,
+        };
+
+        errdefer app_trust_store.?.deleteFile(parsed_url.host.?) catch |err| {
+            stderr.print("Failed to delete server public key {}: Please delete this file by hand or you may not be able to connect to this server in the future!\n", .{
+                parsed_url.host.?,
+            }) catch {};
+        };
+
+        defer file.close();
+
+        // using the "gurl very simple key format":
+        // Line 1: RSA or EC
+        // Line 2: RSA n or EC curve
+        // Line 3: RSA e or EC q
+        // Line 4: key usages
+        // All values (n,e,q) are hex-encoded
+
+        var outstream = file.outStream();
+
+        switch (response.public_key.key) {
+            .rsa => |rsa| {
+                try outstream.writeAll("RSA\n");
+                try outstream.print("{X}\n", .{rsa.n});
+                try outstream.print("{X}\n", .{rsa.e});
+            },
+            .ec => |ec| {
+                const usages = response.public_key.usages orelse @as(c_uint, 0);
+                try outstream.writeAll("EC");
+                try outstream.print("{X}\n", .{ec.curve});
+                try outstream.print("{X}\n", .{ec.q});
+            },
+        }
+        const usages = response.public_key.usages orelse @as(c_uint, 0);
+        try outstream.print("{X}\n", .{usages});
+    }
+
+    switch (response.content) {
         .success => |body| {
 
             // what are we doing with the mime type here?
@@ -125,10 +299,83 @@ pub fn main() !u8 {
                 try stdout.writeAll(body.data);
             }
         },
+        .untrustedCertificate => {
+            try stdout.writeAll("Server is not trusted. Use --accept-host to add the server to your trust store!\n");
+            return 1;
+        },
         else => try stdout.print("unimplemented response type: {}\n", .{response}),
     }
 
     return 0;
+}
+
+fn convertHexToArray(allocator: *std.mem.Allocator, input: []const u8) ![]u8 {
+    if ((input.len % 2) != 0)
+        return error.StringMustHaveEvenLength;
+
+    var data = try allocator.alloc(u8, input.len / 2);
+    errdefer allocator.free(data);
+
+    var i: usize = 0;
+    while (i < input.len) : (i += 2) {
+        data[i / 2] = try std.fmt.parseInt(u8, input[i..][0..2], 16);
+    }
+    return data;
+}
+
+fn parsePublicKeyFile(allocator: *std.mem.Allocator, file: std.fs.File) !ssl.PublicKey {
+    const instream = file.inStream();
+
+    // RSA is supported up to 4096 bits, so 512 byte.
+    var backing_buffer: [520]u8 = undefined;
+
+    const type_id = (try instream.readUntilDelimiterOrEof(&backing_buffer, '\n')) orelse return error.InvalidFormat;
+
+    var key = ssl.PublicKey{
+        .arena = std.heap.ArenaAllocator.init(allocator),
+        .key = undefined,
+        .usages = null,
+    };
+    errdefer key.deinit();
+
+    if (std.mem.eql(u8, type_id, "RSA")) {
+        var rsa = ssl.PublicKey.KeyStore.RSA{
+            .n = undefined,
+            .e = undefined,
+        };
+
+        const n_string = (try instream.readUntilDelimiterOrEof(&backing_buffer, '\n')) orelse return error.InvalidFormat;
+        rsa.n = try convertHexToArray(&key.arena.allocator, n_string);
+
+        const e_string = (try instream.readUntilDelimiterOrEof(&backing_buffer, '\n')) orelse return error.InvalidFormat;
+        rsa.e = try convertHexToArray(&key.arena.allocator, e_string);
+
+        key.key = ssl.PublicKey.KeyStore{
+            .rsa = rsa,
+        };
+    } else if (std.mem.eql(u8, type_id, "EC")) {
+        var ec = ssl.PublicKey.KeyStore.EC{
+            .curve = undefined,
+            .q = undefined,
+        };
+
+        const curve_string = (try instream.readUntilDelimiterOrEof(&backing_buffer, '\n')) orelse return error.InvalidFormat;
+        ec.curve = try std.fmt.parseInt(c_int, curve_string, 16);
+
+        const q_string = (try instream.readUntilDelimiterOrEof(&backing_buffer, '\n')) orelse return error.InvalidFormat;
+
+        ec.q = try convertHexToArray(&key.arena.allocator, q_string);
+        key.key = ssl.PublicKey.KeyStore{
+            .ec = ec,
+        };
+    } else {
+        return error.UnsupportedKeyType;
+    }
+
+    const usages_text = (try instream.readUntilDelimiterOrEof(&backing_buffer, '\n')) orelse return error.InvalidFormat;
+    key.usages = try std.fmt.parseInt(c_uint, usages_text, 16);
+
+    return key;
 }
 
 // gemini://gemini.circumlunar.space/docs/spec-spec.txt
@@ -164,41 +411,25 @@ pub fn main() !u8 {
 // }
 
 /// Response from the server. Must call free to release the resources in the response.
-pub const Response = union(enum) {
+pub const Response = struct {
     const Self = @This();
-    /// When the server is not known or trusted yet, it returns the server keys to be added
-    /// to the trust store if the user wants to
-    untrustedCertificate: CertificateFailure,
 
-    /// Status Code = 1*
-    input: Input,
+    /// Contains the response from the server
+    content: Content,
 
-    /// Status Code = 2*
-    success: Body,
+    /// Contains the certificate chain returned by the server.
+    certificate_chain: []ssl.DERCertificate,
 
-    /// Status Code = 3*
-    redirect: Redirect,
-
-    /// Status Code = 4*
-    temporaryFailure: Failure,
-
-    /// Status Code = 5*
-    permanentFailure: Failure,
-
-    /// Status Code = 6*
-    clientCertificateRequired: CertificateAction,
+    /// The public key of the server extracted from the certificate chain
+    public_key: ssl.PublicKey,
 
     /// Releases the stored resources in the response.
     fn free(self: Self, allocator: *std.mem.Allocator) void {
-        switch (self) {
-            .untrustedCertificate => |info| {
-                for (info.certificate_chain) |cert| {
-                    cert.deinit();
-                }
-                allocator.free(info.certificate_chain);
+        allocator.free(self.certificate_chain);
+        self.public_key.deinit();
 
-                info.public_key.deinit();
-            },
+        switch (self.content) {
+            .untrustedCertificate => {},
             .input => |input| {
                 allocator.free(input.prompt);
             },
@@ -218,9 +449,28 @@ pub const Response = union(enum) {
         }
     }
 
-    pub const CertificateFailure = struct {
-        certificate_chain: []ssl.DERCertificate,
-        public_key: ssl.PublicKey,
+    const Content = union(enum) {
+        /// When the server is not known or trusted yet, it just returns a nil value showing that
+        /// the server could be reached, but we don't trust it.
+        untrustedCertificate: void,
+
+        /// Status Code = 1*
+        input: Input,
+
+        /// Status Code = 2*
+        success: Body,
+
+        /// Status Code = 3*
+        redirect: Redirect,
+
+        /// Status Code = 4*
+        temporaryFailure: Failure,
+
+        /// Status Code = 5*
+        permanentFailure: Failure,
+
+        /// Status Code = 6*
+        clientCertificateRequired: CertificateAction,
     };
 
     pub const Input = struct {
@@ -273,15 +523,22 @@ pub const Response = union(enum) {
 };
 pub const ResponseType = @TagType(Response);
 
+const empty_trust_anchor_set = ssl.TrustAnchorCollection.init(std.testing.failing_allocator);
+
 const RequestOptions = struct {
     memory_limit: usize = 100 * mega_bytes,
-    ignore_hostname_mismatch: bool = false,
-    ignore_untrusted_cert: bool = false,
+    verification: RequestVerification,
+};
+
+const RequestVerification = union(enum) {
+    trust_anchor: ssl.TrustAnchorCollection,
+    public_key: ssl.PublicKey,
+    none: void,
 };
 
 /// Performs a raw request without any redirection handling or somilar.
 /// Either errors out when the request is malformed or returns a response from the server.
-pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorCollection, url: []const u8, options: RequestOptions) !Response {
+pub fn requestRaw(allocator: *std.mem.Allocator, url: []const u8, options: RequestOptions) !Response {
     if (url.len > 1024)
         return error.InvalidUrl;
 
@@ -296,7 +553,7 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
         return error.UnsupportedScheme;
 
     if (parsed_url.host == null)
-        return error.InvalidUrl;
+        return error.MissingAuthority;
 
     const hostname_z = try std.mem.dupeZ(&temp_allocator.allocator, u8, parsed_url.host.?);
 
@@ -322,11 +579,20 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
 
     // std.debug.warn("socket connected to {}.\n", .{ep});
 
-    var ssl_context = ssl.Client.init(allocator, trust_anchors);
+    var ssl_context = switch (options.verification) {
+        .trust_anchor => |list| ssl.Client.init(allocator, list),
+        .none => blk: {
+            var client = ssl.Client.init(allocator, empty_trust_anchor_set);
+            client.x509.options.ignore_untrusted = true;
+            break :blk client;
+        },
+        .public_key => |key| blk: {
+            var client = ssl.Client.init(allocator, empty_trust_anchor_set);
+            client.setToKnownKeyAuth(key);
+            break :blk client;
+        },
+    };
     defer ssl_context.deinit();
-
-    ssl_context.x509_custom.options.ignore_hostname_mismatch = options.ignore_hostname_mismatch;
-    ssl_context.x509_custom.options.ignore_untrusted = options.ignore_untrusted_cert;
 
     ssl_context.relocate();
     try ssl_context.reset(hostname_z, false);
@@ -345,94 +611,104 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
 
     const request = try std.fmt.bufPrint(&work_buf, "{}\r\n", .{url});
 
-    out.writeAll(request) catch |err| switch (err) {
+    const request_response = out.writeAll(request);
+
+    const x509 = &ssl_context.x509;
+
+    var response = Response{
+        .certificate_chain = undefined,
+        .public_key = undefined,
+        .content = undefined,
+    };
+
+    response.public_key = try x509.extractPublicKey(allocator);
+    errdefer response.public_key.deinit();
+
+    response.certificate_chain = x509.certificates.toOwnedSlice();
+    for (response.certificate_chain) |cert| {
+        cert.deinit();
+    }
+    errdefer allocator.free(response.certificate_chain);
+
+    request_response catch |err| switch (err) {
         error.X509_NOT_TRUSTED => {
-            const x509 = &ssl_context.x509_custom;
-
-            var public_key = try x509.extractPublicKey(allocator);
-            errdefer public_key.deinit();
-
-            return Response{
-                .untrustedCertificate = Response.CertificateFailure{
-                    .certificate_chain = x509.certificates.toOwnedSlice(),
-                    .public_key = public_key,
-                },
-            };
+            response.content = Response.Content{ .untrustedCertificate = {} };
+            return response;
         },
         error.X509_BAD_SERVER_NAME => return error.BadServerName,
         else => return err,
     };
     try ssl_stream.flush();
 
-    const response = if (try in.readUntilDelimiterOrEof(&work_buf, '\n')) |buf|
+    const response_header = if (try in.readUntilDelimiterOrEof(&work_buf, '\n')) |buf|
         buf
     else
         return error.InvalidResponse;
 
-    if (response.len < 3)
+    if (response_header.len < 3)
         return error.InvalidResponse;
 
-    if (response[response.len - 1] != '\r') // not delimited by \r\n
+    if (response_header[response_header.len - 1] != '\r') // not delimited by \r\n
         return error.InvalidResponse;
 
-    if (!std.ascii.isDigit(response[0])) // not a number
+    if (!std.ascii.isDigit(response_header[0])) // not a number
         return error.InvalidResponse;
 
-    if (!std.ascii.isDigit(response[1])) // not a number
+    if (!std.ascii.isDigit(response_header[1])) // not a number
         return error.InvalidResponse;
 
-    const meta = std.mem.trim(u8, response[2..], " \t\r\n");
+    const meta = std.mem.trim(u8, response_header[2..], " \t\r\n");
     if (meta.len > 1024)
         return error.InvalidResponse;
 
     // std.debug.warn("handshake complete: {}\n", .{response});
 
-    switch (response[0]) { // primary status code
-        '1' => { // INPUT
+    response.content = switch (response_header[0]) { // primary status code
+        '1' => blk: { // INPUT
             var prompt = try std.mem.dupe(allocator, u8, meta);
             errdefer allocator.free(prompt);
 
-            return Response{
+            break :blk Response.Content{
                 .input = Response.Input{
                     .prompt = prompt,
                 },
             };
         },
-        '2' => { // SUCCESS
+        '2' => blk: { // SUCCESS
             var mime = try std.mem.dupe(allocator, u8, meta);
             errdefer allocator.free(mime);
 
             var data = try in.readAllAlloc(allocator, options.memory_limit);
 
-            return Response{
+            break :blk Response.Content{
                 .success = Response.Body{
                     .mime = mime,
                     .data = data,
-                    .isEndOfClientCertificateSession = (response[1] == '1'), // check for 21
+                    .isEndOfClientCertificateSession = (response_header[1] == '1'), // check for 21
                 },
             };
         },
-        '3' => { // REDIRECT
+        '3' => blk: { // REDIRECT
             var target = try std.mem.dupe(allocator, u8, meta);
             errdefer allocator.free(target);
 
-            return Response{
+            break :blk Response.Content{
                 .redirect = Response.Redirect{
                     .target = target,
-                    .type = if (response[1] == '1')
+                    .type = if (response_header[1] == '1')
                         Response.Redirect.Type.permanent
                     else
                         Response.Redirect.Type.temporary,
                 },
             };
         },
-        '4' => { // TEMPORARY FAILURE
+        '4' => blk: { // TEMPORARY FAILURE
             var message = try std.mem.dupe(allocator, u8, meta);
             errdefer allocator.free(message);
 
-            return Response{
+            break :blk Response.Content{
                 .temporaryFailure = Response.Failure{
-                    .type = switch (response[1]) {
+                    .type = switch (response_header[1]) {
                         '1' => Response.Failure.Type.serverUnavailable,
                         '2' => Response.Failure.Type.cgiError,
                         '3' => Response.Failure.Type.proxyError,
@@ -443,13 +719,13 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
                 },
             };
         },
-        '5' => { // PERMANENT FAILURE
+        '5' => blk: { // PERMANENT FAILURE
             var message = try std.mem.dupe(allocator, u8, meta);
             errdefer allocator.free(message);
 
-            return Response{
+            break :blk Response.Content{
                 .permanentFailure = Response.Failure{
-                    .type = switch (response[1]) {
+                    .type = switch (response_header[1]) {
                         '1' => Response.Failure.Type.notFound,
                         '2' => Response.Failure.Type.gone,
                         '3' => Response.Failure.Type.proxyRequestRefused,
@@ -460,13 +736,13 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
                 },
             };
         },
-        '6' => { // CLIENT CERTIFICATE REQUIRED
+        '6' => blk: { // CLIENT CERTIFICATE REQUIRED
             var message = try std.mem.dupe(allocator, u8, meta);
             errdefer allocator.free(message);
 
-            return Response{
+            break :blk Response.Content{
                 .clientCertificateRequired = Response.CertificateAction{
-                    .type = switch (response[1]) {
+                    .type = switch (response_header[1]) {
                         '1' => Response.CertificateAction.Type.transientCertificateRequested,
                         '2' => Response.CertificateAction.Type.authorisedCertificateRequired,
                         '3' => Response.CertificateAction.Type.certificateNotAccepted,
@@ -479,9 +755,9 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
             };
         },
         else => return error.UnknownStatusCode,
-    }
+    };
 
-    unreachable;
+    return response;
 }
 
 const kibi_bytes = 1024;

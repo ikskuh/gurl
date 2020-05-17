@@ -24,6 +24,10 @@ pub fn build(b: *std.build.Builder) !void {
         module.addPackagePath("args", "./zig-args/args.zig");
     }
 
+    if (mode != .Debug) {
+        gurl.strip = true;
+    }
+
     gurl.install();
 
     const gurl_exec = gurl.run();

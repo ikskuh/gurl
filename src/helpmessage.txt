@@ -7,17 +7,25 @@ The <url> must have the scheme gemini://.
 -O, --remote-name          - Similar to --output, but will use the file name
                              specified in the URL. Note that this option will
                              override a file name set with --output!
--t, --trust <cert>         - Sets the trust level for certifactes. Allowed
+-t, --trust <level>        - Sets the trust level for certifactes. Allowed
                              values are:
                              all  - ignore the server certificate and just 
                              ca   - uses the trust anchor to verify the
                                     certificate
+                             tofu - trust on first use. When a server is first
+                                    time visited, its public key is stored in
+                                    your trust store directory.
     --trust-anchor <cert>  - Uses <cert> (a PEM file) as your trust anchor for
                              certificate validation. The default value is
-                            "/etc/ssl/cert.pem".
-    --ignore-hostname-mismatch
-                           - Ignore when the hostname in the certificate does
-                             not match the hostname specified in <url>.
+                             "/etc/ssl/cert.pem".
+    --trust-store <path>   - Changes the folder which is used as a trust store
+                             for known hosts. This path defaults to either
+                             "$XDG_CONFIG_HOME/gurl/trust-store" or
+                             "~/.config/gurl/trust-store", depending whether 
+                             $XDG_CONFIG_HOME is set or not.
+-a, --accept-host          - Stores the hosts public key into the trust store
+                             to be used with TOFU. The key will be later used
+                             to authenticate the host as a "known host".
     --force-binary-on-stdout
                            - Will output to stdout, even if the mime type does
                              not start with "text/".

@@ -164,7 +164,33 @@ pub const PublicKey = struct {
     }
 
     pub fn toX509(self: Self) c.br_x509_pkey {
-        return self.key;
+        switch (self.key) {
+            .rsa => |rsa| {
+                return c.br_x509_pkey{
+                    .key_type = c.BR_KEYTYPE_RSA,
+                    .key = .{
+                        .rsa = .{
+                            .n = rsa.n.ptr,
+                            .nlen = rsa.n.len,
+                            .e = rsa.e.ptr,
+                            .elen = rsa.e.len,
+                        },
+                    },
+                };
+            },
+            .ec => |ec| {
+                return c.br_x509_pkey{
+                    .key_type = c.BR_KEYTYPE_EC,
+                    .key = .{
+                        .ec = .{
+                            .curve = ec.curve,
+                            .q = ec.q.ptr,
+                            .qlen = ec.q.len,
+                        },
+                    },
+                };
+            },
+        }
     }
 
     pub fn deinit(self: Self) void {
@@ -417,6 +443,7 @@ pub const CertificateValidator = struct {
 
     vtable: *const c.br_x509_class = &class,
     x509_minimal: c.br_x509_minimal_context,
+    x509_known_key: ?c.br_x509_knownkey_context,
 
     allocator: *std.mem.Allocator,
     certificates: std.ArrayList(DERCertificate),
@@ -439,13 +466,30 @@ pub const CertificateValidator = struct {
         }
     }
 
+    fn returnTypeOf(comptime Class: type, comptime name: []const u8) type {
+        return @typeInfo(std.meta.Child(std.meta.fieldInfo(Class, name).field_type)).Fn.return_type.?;
+    }
+
+    fn virtualCall(object: var, comptime name: []const u8, args: var) returnTypeOf(c.br_x509_class, name) {
+        return @call(.{}, @field(object.vtable.?.*, name).?, .{&object.vtable} ++ args);
+    }
+
+    fn proxyCall(self: var, comptime name: []const u8, args: var) returnTypeOf(c.br_x509_class, name) {
+        if (self.x509_known_key) |*kc| {
+            return virtualCall(kc, name, args);
+        } else {
+            return virtualCall(&self.x509_minimal, name, args);
+        }
+    }
+
     fn start_chain(ctx: [*c][*c]const c.br_x509_class, server_name: [*c]const u8) callconv(.C) void {
         const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
         // std.debug.warn("start_chain({0}, {1})\n", .{
         //     ctx,
         //     std.mem.spanZ(server_name),
         // });
-        self.x509_minimal.vtable.?.*.start_chain.?(&self.x509_minimal.vtable, server_name);
+
+        self.proxyCall("start_chain", .{server_name});
 
         for (self.certificates.items) |cert| {
             cert.deinit();
@@ -466,7 +510,7 @@ pub const CertificateValidator = struct {
         //     ctx,
         //     length,
         // });
-        self.x509_minimal.vtable.?.*.start_cert.?(&self.x509_minimal.vtable, length);
+        self.proxyCall("start_cert", .{length});
 
         self.temp_buffer = FixedGrowBuffer(u8, 2048).init();
         self.current_cert_valid = true;
@@ -479,7 +523,7 @@ pub const CertificateValidator = struct {
         //     buf,
         //     len,
         // });
-        self.x509_minimal.vtable.?.*.append.?(&self.x509_minimal.vtable, buf, len);
+        self.proxyCall("append", .{ buf, len });
 
         self.temp_buffer.write(buf[0..len]) catch {
             std.debug.warn("too much memory!\n", .{});
@@ -492,7 +536,7 @@ pub const CertificateValidator = struct {
         // std.debug.warn("end_cert({})\n", .{
         //     ctx,
         // });
-        self.x509_minimal.vtable.?.*.end_cert.?(&self.x509_minimal.vtable);
+        self.proxyCall("end_cert", .{});
 
         if (self.current_cert_valid) {
             const cert = DERCertificate{
@@ -505,32 +549,10 @@ pub const CertificateValidator = struct {
         }
     }
 
-    fn saveCertificates(self: Self, folder: []const u8) !void {
-        var trust_store_dir = try std.fs.cwd().openDir("trust-store", .{ .access_sub_paths = true, .iterate = false });
-        defer trust_store_dir.close();
-
-        trust_store_dir.makeDir(folder) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        var server_dir = try trust_store_dir.openDir(folder, .{ .access_sub_paths = true, .iterate = false });
-        defer server_dir.close();
-
-        for (self.certificates.items) |cert, index| {
-            var name_buf: [64]u8 = undefined;
-            var name = try std.fmt.bufPrint(&name_buf, "cert-{}.der", .{index});
-
-            var file = try server_dir.createFile(name, .{ .exclusive = false });
-            defer file.close();
-
-            try file.writeAll(cert.data);
-        }
-    }
-
     fn end_chain(ctx: [*c][*c]const c.br_x509_class) callconv(.C) c_uint {
         const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
-        const err = self.x509_minimal.vtable.?.*.end_chain.?(&self.x509_minimal.vtable);
+
+        const err = self.proxyCall("end_chain", .{});
         // std.debug.warn("end_chain({}) → {}\n", .{
         //     ctx,
         //     err,
@@ -557,7 +579,7 @@ pub const CertificateValidator = struct {
     fn get_pkey(ctx: [*c]const [*c]const c.br_x509_class, usages: [*c]c_uint) callconv(.C) [*c]const c.br_x509_pkey {
         const self = @fieldParentPtr(Self, "vtable", @ptrCast(*const *const c.br_x509_class, ctx));
 
-        const pkey = self.x509_minimal.vtable.?.*.get_pkey.?(&self.x509_minimal.vtable, usages);
+        const pkey = self.proxyCall("get_pkey", .{usages});
         // std.debug.warn("get_pkey({}, {}) → {}\n", .{
         //     ctx,
         //     usages,
@@ -566,9 +588,32 @@ pub const CertificateValidator = struct {
         return pkey;
     }
 
+    fn saveCertificates(self: Self, folder: []const u8) !void {
+        var trust_store_dir = try std.fs.cwd().openDir("trust-store", .{ .access_sub_paths = true, .iterate = false });
+        defer trust_store_dir.close();
+
+        trust_store_dir.makeDir(folder) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        var server_dir = try trust_store_dir.openDir(folder, .{ .access_sub_paths = true, .iterate = false });
+        defer server_dir.close();
+
+        for (self.certificates.items) |cert, index| {
+            var name_buf: [64]u8 = undefined;
+            var name = try std.fmt.bufPrint(&name_buf, "cert-{}.der", .{index});
+
+            var file = try server_dir.createFile(name, .{ .exclusive = false });
+            defer file.close();
+
+            try file.writeAll(cert.data);
+        }
+    }
+
     pub fn extractPublicKey(self: Self, allocator: *std.mem.Allocator) !PublicKey {
         var usages: c_uint = 0;
-        const pkey = self.x509_minimal.vtable.?.*.get_pkey.?(&self.x509_minimal.vtable, usages);
+        const pkey = self.proxyCall("get_pkey", .{usages});
         std.debug.assert(pkey != null);
         var key = try PublicKey.fromX509(allocator, pkey.*);
         key.usages = usages;
@@ -580,32 +625,41 @@ pub const Client = struct {
     const Self = @This();
 
     client: c.br_ssl_client_context,
-    x509_custom: CertificateValidator,
+    x509: CertificateValidator,
     iobuf: [c.BR_SSL_BUFSIZE_BIDI]u8,
 
     pub fn init(allocator: *std.mem.Allocator, tac: TrustAnchorCollection) Self {
         var ctx = Self{
             .client = undefined,
-            .x509_custom = .{
+            .x509 = .{
                 .x509_minimal = undefined,
+                .x509_known_key = null,
 
                 .allocator = allocator,
                 .certificates = std.ArrayList(DERCertificate).init(allocator),
             },
             .iobuf = undefined,
         };
-        c.br_ssl_client_init_full(&ctx.client, &ctx.x509_custom.x509_minimal, tac.items.items.ptr, tac.items.items.len);
+        c.br_ssl_client_init_full(&ctx.client, &ctx.x509.x509_minimal, tac.items.items.ptr, tac.items.items.len);
 
         return ctx;
     }
 
     pub fn deinit(self: *Self) void {
-        self.x509_custom.deinit();
+        self.x509.deinit();
     }
 
     pub fn relocate(self: *Self) void {
-        c.br_ssl_engine_set_x509(&self.client.eng, @ptrCast([*c][*c]const c.br_x509_class, &self.x509_custom.vtable));
+        c.br_ssl_engine_set_x509(&self.client.eng, @ptrCast([*c][*c]const c.br_x509_class, &self.x509.vtable));
         c.br_ssl_engine_set_buffer(&self.client.eng, &self.iobuf, self.iobuf.len, 1);
+    }
+
+    pub fn setToKnownKeyAuth(self: *Self, key: PublicKey) void {
+        self.x509.x509_known_key = c.br_x509_knownkey_context{
+            .vtable = &c.br_x509_knownkey_vtable,
+            .pkey = key.toX509(),
+            .usages = (key.usages orelse 0) | c.BR_KEYTYPE_KEYX | c.BR_KEYTYPE_SIGN, // always allow a stored key for key-exchange
+        };
     }
 
     pub fn reset(self: *Self, host: [:0]const u8, resumeSession: bool) !void {

@@ -45,7 +45,9 @@ Give the user control over their system and make configuration easy.
 - auto-accept when first seen in a session (TOFU, no disk usage)
 - always ask when first seen in a session (interactive TOFU, no disk usage)
 
+### Future Plans
 
+Correctly adhere to XDG standards and use `xdg-open`
 
 ## Tools
 
