@@ -29,8 +29,8 @@ A [Gemini](https://gemini.circumlunar.space/) command line interface similar to 
 ## Build Instructions
 
 1. Refresh submodules (`git submodule init`, `git submodule update`)
-2. Build bearssl (just run `make`)
-3. Build gurl (`zig build`)
+2. Build gurl (`zig build`)
+3. Run `./zig-cache/bin/gurl` 
 
 ## Design Considerations
 
