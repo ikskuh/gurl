@@ -2,10 +2,134 @@ const std = @import("std");
 const network = @import("network");
 const ssl = @import("bearssl.zig");
 const uri = @import("uri");
+const args_parse = @import("args");
 
-const c = @cImport({
-    @cInclude("bearssl.h");
-});
+const TrustLevel = enum {
+    all,
+    ca,
+};
+
+pub fn main() !u8 {
+    const generic_allocator = std.heap.page_allocator; // THIS IS INEFFICIENT AS FUCK
+
+    var cli = try args_parse.parseForCurrentProcess(struct {
+        @"remote-name": bool = false,
+        output: ?[]const u8 = null,
+        help: bool = false,
+        trust: TrustLevel = .ca,
+        @"trust-anchor": []const u8 = "/etc/ssl/cert.pem",
+        @"ignore-hostname-mismatch": bool = false,
+        @"force-binary-on-stdout": bool = false,
+
+        pub const shorthands = .{
+            .O = "remote-name",
+            .o = "output",
+            .h = "help",
+            .t = "trust",
+        };
+    }, generic_allocator);
+    defer cli.deinit();
+
+    const stdout = std.io.getStdOut().outStream();
+    const stderr = std.io.getStdErr().outStream();
+
+    if (cli.options.help or cli.positionals.len != 1) {
+        try stderr.print(
+            "{} [--help] [--remote-name] [--output <file>] <url>\n",
+            .{std.fs.path.basename(cli.executable_name.?)},
+        );
+        try stderr.writeAll(@embedFile("helpmessage.txt"));
+
+        return if (cli.options.help) @as(u8, 0) else 1;
+    }
+
+    if (cli.options.@"remote-name") {
+        if (cli.options.output != null) {
+            try stderr.writeAll("--remote-name and --output are not allowed to be used both. Chose one!\n");
+            return 1;
+        }
+
+        const parsed_url = try uri.parse(cli.positionals[0]);
+
+        const file_name = std.fs.path.basename(parsed_url.path.?);
+
+        if (file_name.len == 0) {
+            try stderr.writeAll("The url does not contain a file name. Use --output to specify a file name!\n");
+            return 1;
+        }
+
+        cli.options.output = file_name;
+    }
+
+    var trust_anchors = ssl.TrustAnchorCollection.init(generic_allocator);
+    defer trust_anchors.deinit();
+
+    if (cli.options.trust == .ca) {
+        var file = try std.fs.cwd().openFile(cli.options.@"trust-anchor", .{ .read = true, .write = false });
+        defer file.close();
+
+        const pem_text = try file.inStream().readAllAlloc(generic_allocator, 1 << 20); // 1 MB
+        defer generic_allocator.free(pem_text);
+
+        try trust_anchors.appendFromPEM(pem_text);
+    }
+
+    // TODO:
+    // - "gemini://heavysquare.com/" does not send an end-of-stream?!
+    // - ""gemini://typed-hole.org/topkek" does not send an end-of-stream?!
+
+    const options = RequestOptions{
+        .memory_limit = 100 * mebi_bytes,
+        .ignore_untrusted_cert = (cli.options.trust == .all),
+        .ignore_hostname_mismatch = cli.options.@"ignore-hostname-mismatch",
+    };
+
+    var response = requestRaw(generic_allocator, trust_anchors, cli.positionals[0], options) catch |err| switch (err) {
+        error.UnsupportedScheme => {
+            try stderr.writeAll("The url scheme is not supported!\n");
+            return 1;
+        },
+
+        error.CouldNotConnect => {
+            try stderr.writeAll("Failed to connect to the server. Is the address correct and the server reachable?\n");
+            return 1;
+        },
+
+        error.BadServerName => {
+            try stderr.writeAll("The server certificate is not valid for the given host name!\n");
+            return 1;
+        },
+
+        else => return err,
+    };
+    defer response.free(generic_allocator);
+
+    switch (response) {
+        .success => |body| {
+
+            // what are we doing with the mime type here?
+            try stderr.print("MIME: {0}\n", .{body.mime});
+
+            if (cli.options.output) |file_name| {
+                var outfile = try std.fs.cwd().createFile(file_name, .{ .exclusive = false });
+                defer outfile.close();
+
+                try outfile.writeAll(body.data);
+            } else {
+                if (!std.mem.startsWith(u8, body.mime, "text/") and !cli.options.@"force-binary-on-stdout") {
+                    try stderr.print("Will not write data of type {} to stdout unless --force-binary-on-stdout is used.\n", .{
+                        body.mime,
+                    });
+                    return 1;
+                }
+                try stdout.writeAll(body.data);
+            }
+        },
+        else => try stdout.print("unimplemented response type: {}\n", .{response}),
+    }
+
+    return 0;
+}
 
 // gemini://gemini.circumlunar.space/docs/spec-spec.txt
 // gemini://gemini.conman.org/test/torture/0000
@@ -39,29 +163,42 @@ const c = @cImport({
 //   return EXIT_FAILURE;
 // }
 
-// Load the system-local trust anchor (certificate authority certificates)
-fn loadTrustAnchors(allocator: *std.mem.Allocator) !ssl.TrustAnchorCollection {
-    var file = try std.fs.cwd().openFile("/etc/ssl/cert.pem", .{ .read = true, .write = false });
-    defer file.close();
-
-    const pem_text = try file.inStream().readAllAlloc(allocator, 1 << 20); // 1 MB
-    defer allocator.free(pem_text);
-
-    return try ssl.TrustAnchorCollection.load(allocator, pem_text);
-}
-
+/// Response from the server. Must call free to release the resources in the response.
 pub const Response = union(enum) {
     const Self = @This();
+    /// When the server is not known or trusted yet, it returns the server keys to be added
+    /// to the trust store if the user wants to
+    untrustedCertificate: CertificateFailure,
 
+    /// Status Code = 1*
     input: Input,
+
+    /// Status Code = 2*
     success: Body,
+
+    /// Status Code = 3*
     redirect: Redirect,
+
+    /// Status Code = 4*
     temporaryFailure: Failure,
+
+    /// Status Code = 5*
     permanentFailure: Failure,
+
+    /// Status Code = 6*
     clientCertificateRequired: CertificateAction,
 
+    /// Releases the stored resources in the response.
     fn free(self: Self, allocator: *std.mem.Allocator) void {
         switch (self) {
+            .untrustedCertificate => |info| {
+                for (info.certificate_chain) |cert| {
+                    cert.deinit();
+                }
+                allocator.free(info.certificate_chain);
+
+                info.public_key.deinit();
+            },
             .input => |input| {
                 allocator.free(input.prompt);
             },
@@ -80,6 +217,11 @@ pub const Response = union(enum) {
             },
         }
     }
+
+    pub const CertificateFailure = struct {
+        certificate_chain: []ssl.DERCertificate,
+        public_key: ssl.PublicKey,
+    };
 
     pub const Input = struct {
         prompt: []const u8,
@@ -131,7 +273,15 @@ pub const Response = union(enum) {
 };
 pub const ResponseType = @TagType(Response);
 
-pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorCollection, url: []const u8, memoryLimit: usize) !Response {
+const RequestOptions = struct {
+    memory_limit: usize = 100 * mega_bytes,
+    ignore_hostname_mismatch: bool = false,
+    ignore_untrusted_cert: bool = false,
+};
+
+/// Performs a raw request without any redirection handling or somilar.
+/// Either errors out when the request is malformed or returns a response from the server.
+pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorCollection, url: []const u8, options: RequestOptions) !Response {
     if (url.len > 1024)
         return error.InvalidUrl;
 
@@ -172,9 +322,15 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
 
     // std.debug.warn("socket connected to {}.\n", .{ep});
 
-    var ssl_context = ssl.Client.init(trust_anchors);
+    var ssl_context = ssl.Client.init(allocator, trust_anchors);
+    defer ssl_context.deinit();
+
+    ssl_context.x509_custom.options.ignore_hostname_mismatch = options.ignore_hostname_mismatch;
+    ssl_context.x509_custom.options.ignore_untrusted = options.ignore_untrusted_cert;
+
     ssl_context.relocate();
     try ssl_context.reset(hostname_z, false);
+
     // std.debug.warn("ssl initialized.\n", .{});
 
     var ssl_stream = ssl.Stream.init(ssl_context.getEngine(), socket.internal);
@@ -190,7 +346,19 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
     const request = try std.fmt.bufPrint(&work_buf, "{}\r\n", .{url});
 
     out.writeAll(request) catch |err| switch (err) {
-        error.X509_NOT_TRUSTED => return error.UntrustedCertificate,
+        error.X509_NOT_TRUSTED => {
+            const x509 = &ssl_context.x509_custom;
+
+            var public_key = try x509.extractPublicKey(allocator);
+            errdefer public_key.deinit();
+
+            return Response{
+                .untrustedCertificate = Response.CertificateFailure{
+                    .certificate_chain = x509.certificates.toOwnedSlice(),
+                    .public_key = public_key,
+                },
+            };
+        },
         error.X509_BAD_SERVER_NAME => return error.BadServerName,
         else => return err,
     };
@@ -234,7 +402,7 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
             var mime = try std.mem.dupe(allocator, u8, meta);
             errdefer allocator.free(mime);
 
-            var data = try in.readAllAlloc(allocator, memoryLimit);
+            var data = try in.readAllAlloc(allocator, options.memory_limit);
 
             return Response{
                 .success = Response.Body{
@@ -316,34 +484,6 @@ pub fn requestRaw(allocator: *std.mem.Allocator, trust_anchors: ssl.TrustAnchorC
     unreachable;
 }
 
-pub fn main() !u8 {
-    const generic_allocator = std.heap.page_allocator; // THIS IS INEFFICIENT AS FUCK
-
-    const stdout = std.io.getStdOut().outStream();
-
-    var trust_anchors = try loadTrustAnchors(generic_allocator);
-    defer trust_anchors.deinit();
-
-    // TODO:
-    // - "gemini://heavysquare.com/" does not send an end-of-stream?!
-    // - ""gemini://typed-hole.org/topkek" does not send an end-of-stream?!
-
-    // "gemini://gemini.circumlunar.space/docs/"
-    const request_uri = "gemini://mozz.us/tpokek";
-
-    var response = try requestRaw(generic_allocator, trust_anchors, request_uri, 100 * mebi_bytes);
-
-    switch (response) {
-        .success => |body| {
-            try stdout.print("MIME: {0}\n", .{body.mime});
-            try stdout.writeAll(body.data);
-        },
-        else => try stdout.print("unimplemented response type: {}\n", .{response}),
-    }
-
-    return 0;
-}
-
 const kibi_bytes = 1024;
 const mebi_bytes = 1024 * 1024;
 const gibi_bytes = 1024 * 1024 * 1024;
@@ -398,6 +538,19 @@ fn runTestRequest(url: []const u8, expected_response: TestExpection) !void {
     }
 }
 
+// Test some API invariants:
+
+test "invalid url scheme" {
+    requestRaw("madeup+uri://lolwat/wellheck") catch |err| switch (err) {
+        error.UnsupportedScheme => return, // this is actually the success vector!
+        else => return err,
+    };
+
+    unreachable;
+}
+
+// Test several different responses
+
 test "10 INPUT: query gus" {
     try runTestRequest("gemini://gus.guru/search", .{ .response = .input });
 }
@@ -407,7 +560,6 @@ test "51 PERMANENT FAILURE: query mozz.us" {
 }
 
 // Run test suite against conmans torture suit
-//
 
 // Index page
 test "torture suite (0000)" {

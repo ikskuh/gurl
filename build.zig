@@ -9,35 +9,28 @@ pub fn build(b: *std.build.Builder) !void {
     });
 
     const gurl = b.addExecutable("gurl", "src/main.zig");
-    gurl.setBuildMode(mode);
-    gurl.setTarget(target);
-    gurl.linkLibC();
-
-    gurl.addIncludeDir("./BearSSL/inc");
-    gurl.addLibPath("./BearSSL/build");
-    gurl.linkSystemLibrary("bearssl");
-
-    gurl.addPackagePath("network", "./zig-network/network.zig");
-    gurl.addPackagePath("uri", "./zig-uri/uri.zig");
-
     const gurl_test = b.addTest("src/main.zig");
-    gurl_test.setBuildMode(mode);
-    gurl_test.setTarget(target);
-    gurl_test.linkLibC();
 
-    gurl_test.addIncludeDir("./BearSSL/inc");
-    gurl_test.addLibPath("./BearSSL/build");
-    gurl_test.linkSystemLibrary("bearssl");
+    for ([_]*std.build.LibExeObjStep{ gurl, gurl_test }) |module| {
+        module.setBuildMode(mode);
+        module.setTarget(target);
+        module.linkLibC();
 
-    gurl_test.addPackagePath("network", "./zig-network/network.zig");
-    gurl_test.addPackagePath("uri", "./zig-uri/uri.zig");
+        module.addIncludeDir("./BearSSL/inc");
+        module.addLibPath("./BearSSL/build");
+        module.linkSystemLibrary("bearssl");
 
-    gurl.install();
+        module.addPackagePath("network", "./zig-network/network.zig");
+        module.addPackagePath("uri", "./zig-uri/uri.zig");
+        module.addPackagePath("args", "./zig-args/args.zig");
+    }
 
     const gurl_exec = gurl.run();
     gurl_exec.addArgs(&[_][]const u8{
         "gemini://gemini.circumlunar.space/",
     });
+
+    gurl.install();
 
     const run_step = b.step("run", "Runs gurl with gemini://gemini.circumlunar.space/");
     run_step.dependOn(&gurl_exec.step);

@@ -14,6 +14,11 @@ A [Gemini](https://gemini.circumlunar.space/) command line interface similar to 
 - [ ] All of the correct heading handling
   - [ ] Following redirects
   - [ ] …
+- [ ] TOFU (trust on first use) for SSL connections
+- [ ] Client certificates
+  - [ ] temporary cert
+  - [ ] permanent cert
+- [ ] Use [XDG directories](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html)
 
 ## Dependencies
 
@@ -26,3 +31,35 @@ A [Gemini](https://gemini.circumlunar.space/) command line interface similar to 
 1. Refresh submodules (`git submodule init`, `git submodule update`)
 2. Build bearssl (just run `make`)
 3. Build gurl (`zig build`)
+
+## Design Considerations
+
+Give the user control over their system and make configuration easy.
+
+### Certificate Trust
+
+- accept any certificate
+- auto-accept the cert on first use (TOFU)
+- use CAs or ask user on first sight (TOFU+CA)
+- always ask on first sight (interactive TOFU)
+- auto-accept when first seen in a session (TOFU, no disk usage)
+- always ask when first seen in a session (interactive TOFU, no disk usage)
+
+
+
+## Tools
+
+Connect with OpenSSL:
+```
+openssl s_client --connect domain.name -quiet -verify_quiet
+```
+
+Dump DER certificate information:
+```
+openssl x509 -in trust-store/mozz.us/cert-1.der -inform der -text
+``` 
+
+Convert DER to PEM:
+```
+openssl x509 -inform der -in trust-store/gemini.conman.org/cert-0.der -out conman.pem
+```

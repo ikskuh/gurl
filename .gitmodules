@@ -7,3 +7,6 @@
 [submodule "zig-uri"]
 	path = zig-uri
 	url = https://github.com/MasterQ32/zig-uri
+[submodule "zig-args"]
+	path = zig-args
+	url = https://github.com/MasterQ32/zig-args

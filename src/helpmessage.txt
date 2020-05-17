@@ -1,0 +1,23 @@
+This tool fetches gemini resources from gemspace.
+The <url> must have the scheme gemini://.
+
+-h, --help                 - Prints this help text
+-o, --output <file>        - Saves the requested file into <file> instead of
+                             writing it to stdout.
+-O, --remote-name          - Similar to --output, but will use the file name
+                             specified in the URL. Note that this option will
+                             override a file name set with --output!
+-t, --trust <cert>         - Sets the trust level for certifactes. Allowed
+                             values are:
+                             all  - ignore the server certificate and just 
+                             ca   - uses the trust anchor to verify the
+                                    certificate
+    --trust-anchor <cert>  - Uses <cert> (a PEM file) as your trust anchor for
+                             certificate validation. The default value is
+                            "/etc/ssl/cert.pem".
+    --ignore-hostname-mismatch
+                           - Ignore when the hostname in the certificate does
+                             not match the hostname specified in <url>.
+    --force-binary-on-stdout
+                           - Will output to stdout, even if the mime type does
+                             not start with "text/".

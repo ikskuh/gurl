@@ -129,14 +129,133 @@ fn convertError(err: c_int) BearError {
     };
 }
 
+pub const PublicKey = struct {
+    const Self = @This();
+
+    arena: std.heap.ArenaAllocator,
+    key: KeyStore,
+    usages: ?c_uint,
+
+    pub fn fromX509(allocator: *std.mem.Allocator, inkey: c.br_x509_pkey) !Self {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+
+        var key = switch (inkey.key_type) {
+            c.BR_KEYTYPE_RSA => KeyStore{
+                .rsa = .{
+                    .n = try std.mem.dupe(&arena.allocator, u8, inkey.key.rsa.n[0..inkey.key.rsa.nlen]),
+                    .e = try std.mem.dupe(&arena.allocator, u8, inkey.key.rsa.e[0..inkey.key.rsa.elen]),
+                },
+            },
+            c.BR_KEYTYPE_EC => KeyStore{
+                .ec = .{
+                    .curve = inkey.key.ec.curve,
+                    .q = try std.mem.dupe(&arena.allocator, u8, inkey.key.ec.q[0..inkey.key.ec.qlen]),
+                },
+            },
+            else => return error.UnsupportedKeyType,
+        };
+
+        return Self{
+            .arena = arena,
+            .key = key,
+            .usages = null,
+        };
+    }
+
+    pub fn toX509(self: Self) c.br_x509_pkey {
+        return self.key;
+    }
+
+    pub fn deinit(self: Self) void {
+        self.arena.deinit();
+    }
+
+    /// Encodes the public key with DER ASN.1 encoding into `target`.
+    /// If `target` is not set, the function will only calculate the required
+    /// buffer size.
+    ///
+    /// https://tools.ietf.org/html/rfc8017#appendix-A.1.1
+    /// RSAPublicKey ::= SEQUENCE {
+    ///     modulus           INTEGER,  -- n
+    ///     publicExponent    INTEGER   -- e
+    /// }
+    pub fn asn1Encode(self: Self, target: ?[]u8) !usize {
+        if (self.key != .rsa)
+            return error.KeytypeNotSupportedYet;
+
+        var sequence_content = [_]asn1.Value{
+            asn1.Value{
+                .integer = asn1.Integer{ .value = self.key.rsa.n },
+            },
+            asn1.Value{
+                .integer = asn1.Integer{ .value = self.key.rsa.e },
+            },
+        };
+
+        var sequence = asn1.Value{
+            .sequence = asn1.Sequence{ .items = &sequence_content },
+        };
+
+        return try asn1.encode(target, sequence);
+    }
+
+    pub const KeyStore = union(enum) {
+        ec: EC,
+        rsa: RSA,
+
+        pub const EC = struct {
+            curve: c_int,
+            q: []u8,
+        };
+
+        pub const RSA = struct {
+            n: []u8,
+            e: []u8,
+        };
+    };
+};
+
+pub const DERCertificate = struct {
+    const Self = @This();
+
+    allocator: *std.mem.Allocator,
+    data: []u8,
+
+    pub fn deinit(self: Self) void {
+        self.allocator.free(self.data);
+    }
+
+    fn fromX509(allocator: *std.mem.Allocator, cert: *c.br_x509_certificate) !Certificate {
+        return Self{
+            .allocator = allocator,
+            .data = try std.mem.dupe(allocator, u8, cert.data[0..cert.data_len]),
+        };
+    }
+
+    fn toX509(self: *Self) c.br_x509_certificate {
+        return c.br_x509_certificate{
+            .data_len = self.data.len,
+            .data = self.data.ptr,
+        };
+    }
+};
+
 pub const TrustAnchorCollection = struct {
     const Self = @This();
 
     arena: std.heap.ArenaAllocator,
-    items: []c.br_x509_trust_anchor,
+    items: std.ArrayList(c.br_x509_trust_anchor),
 
-    pub fn load(allocator: *std.mem.Allocator, pem_text: []const u8) !Self {
-        var objectBuffer = std.ArrayList(u8).init(allocator);
+    pub fn init(allocator: *std.mem.Allocator) Self {
+        return Self{
+            .items = std.ArrayList(c.br_x509_trust_anchor).init(allocator),
+            .arena = std.heap.ArenaAllocator.init(allocator),
+        };
+    }
+
+    pub fn appendFromPEM(self: *Self, pem_text: []const u8) !void {
+        var objectBuffer = std.ArrayList(u8).init(self.items.allocator);
         defer objectBuffer.deinit();
 
         try objectBuffer.ensureCapacity(8192);
@@ -145,11 +264,6 @@ pub const TrustAnchorCollection = struct {
         c.br_pem_decoder_init(&x509_decoder);
 
         var current_obj_is_certificate = false;
-
-        var arena = std.heap.ArenaAllocator.init(allocator);
-
-        var trust_anchors = std.ArrayList(c.br_x509_trust_anchor).init(&arena.allocator);
-        defer trust_anchors.deinit();
 
         var offset: usize = 0;
         while (offset < pem_text.len) {
@@ -178,9 +292,9 @@ pub const TrustAnchorCollection = struct {
                             .data_len = objectBuffer.items.len,
                         };
 
-                        var trust_anchor = try convertToTrustAnchor(&arena.allocator, certificate);
+                        var trust_anchor = try convertToTrustAnchor(&self.arena.allocator, certificate);
 
-                        try trust_anchors.append(trust_anchor);
+                        try self.items.append(trust_anchor);
                         // ignore end of
                     } else {
                         std.debug.warn("end of ignored object.\n", .{});
@@ -193,22 +307,104 @@ pub const TrustAnchorCollection = struct {
                 else => unreachable, // no other values are specified
             }
         }
-
-        return Self{
-            .items = trust_anchors.toOwnedSlice(),
-            .arena = arena,
-        };
     }
 
     pub fn deinit(self: Self) void {
+        self.items.deinit();
         self.arena.deinit();
+    }
+
+    fn convertToTrustAnchor(allocator: *std.mem.Allocator, cert: c.br_x509_certificate) !c.br_x509_trust_anchor {
+        var dc: c.br_x509_decoder_context = undefined;
+
+        var vdn = std.ArrayList(u8).init(allocator);
+        defer vdn.deinit();
+
+        c.br_x509_decoder_init(&dc, appendToBuffer, &vdn);
+        c.br_x509_decoder_push(&dc, cert.data, cert.data_len);
+
+        const public_key: *c.br_x509_pkey = if (@ptrCast(?*c.br_x509_pkey, c.br_x509_decoder_get_pkey(&dc))) |pk|
+            pk
+        else
+            return convertError(c.br_x509_decoder_last_error(&dc));
+
+        var ta = c.br_x509_trust_anchor{
+            .dn = undefined,
+            .flags = 0,
+            .pkey = undefined,
+        };
+
+        if (c.br_x509_decoder_isCA(&dc) != 0) {
+            ta.flags |= c.BR_X509_TA_CA;
+        }
+
+        switch (public_key.key_type) {
+            c.BR_KEYTYPE_RSA => {
+                var n = try std.mem.dupe(allocator, u8, public_key.key.rsa.n[0..public_key.key.rsa.nlen]);
+                errdefer allocator.free(n);
+
+                var e = try std.mem.dupe(allocator, u8, public_key.key.rsa.e[0..public_key.key.rsa.elen]);
+                errdefer allocator.free(e);
+
+                ta.pkey = .{
+                    .key_type = c.BR_KEYTYPE_RSA,
+                    .key = .{
+                        .rsa = .{
+                            .n = n.ptr,
+                            .nlen = n.len,
+                            .e = e.ptr,
+                            .elen = e.len,
+                        },
+                    },
+                };
+            },
+            c.BR_KEYTYPE_EC => {
+                var q = try std.mem.dupe(allocator, u8, public_key.key.ec.q[0..public_key.key.ec.qlen]);
+                errdefer allocator.free(q);
+
+                ta.pkey = .{
+                    .key_type = c.BR_KEYTYPE_EC,
+                    .key = .{
+                        .ec = .{
+                            .curve = public_key.key.ec.curve,
+                            .q = q.ptr,
+                            .qlen = q.len,
+                        },
+                    },
+                };
+            },
+            else => return error.UnsupportedKeyType,
+        }
+
+        errdefer switch (public_key.key_type) {
+            c.BR_KEYTYPE_RSA => {
+                allocator.free(ta.pkey.key.rsa.n[0..ta.pkey.key.rsa.nlen]);
+                allocator.free(ta.pkey.key.rsa.e[0..ta.pkey.key.rsa.elen]);
+            },
+            c.BR_KEYTYPE_EC => allocator.free(ta.pkey.key.ec.q[0..ta.pkey.key.ec.qlen]),
+            else => unreachable,
+        };
+
+        const dn = vdn.toOwnedSlice();
+        ta.dn = .{
+            .data = dn.ptr,
+            .len = dn.len,
+        };
+
+        return ta;
     }
 };
 
 /// Custom x509 engine that uses the minimal engine and ignores missing trust.
 /// First step in TOFU direction
-const CertificateValidator = extern struct {
+pub const CertificateValidator = struct {
     const Self = @This();
+
+    const Options = struct {
+        ignore_untrusted: bool = false,
+        ignore_hostname_mismatch: bool = false,
+    };
+
     const class = c.br_x509_class{
         .context_size = @sizeOf(Self),
         .start_chain = start_chain,
@@ -222,6 +418,27 @@ const CertificateValidator = extern struct {
     vtable: *const c.br_x509_class = &class,
     x509_minimal: c.br_x509_minimal_context,
 
+    allocator: *std.mem.Allocator,
+    certificates: std.ArrayList(DERCertificate),
+
+    current_cert_valid: bool = undefined,
+    temp_buffer: FixedGrowBuffer(u8, 2048) = undefined,
+
+    server_name: ?[]const u8 = null,
+
+    options: Options = Options{},
+
+    pub fn deinit(self: Self) void {
+        for (self.certificates.items) |cert| {
+            cert.deinit();
+        }
+        self.certificates.deinit();
+
+        if (self.server_name) |name| {
+            self.allocator.free(name);
+        }
+    }
+
     fn start_chain(ctx: [*c][*c]const c.br_x509_class, server_name: [*c]const u8) callconv(.C) void {
         const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
         // std.debug.warn("start_chain({0}, {1})\n", .{
@@ -229,6 +446,18 @@ const CertificateValidator = extern struct {
         //     std.mem.spanZ(server_name),
         // });
         self.x509_minimal.vtable.?.*.start_chain.?(&self.x509_minimal.vtable, server_name);
+
+        for (self.certificates.items) |cert| {
+            cert.deinit();
+        }
+        self.certificates.shrink(0);
+
+        if (self.server_name) |name| {
+            self.allocator.free(name);
+        }
+        self.server_name = null;
+
+        self.server_name = std.mem.dupe(self.allocator, u8, std.mem.spanZ(server_name)) catch null;
     }
 
     fn start_cert(ctx: [*c][*c]const c.br_x509_class, length: u32) callconv(.C) void {
@@ -238,6 +467,9 @@ const CertificateValidator = extern struct {
         //     length,
         // });
         self.x509_minimal.vtable.?.*.start_cert.?(&self.x509_minimal.vtable, length);
+
+        self.temp_buffer = FixedGrowBuffer(u8, 2048).init();
+        self.current_cert_valid = true;
     }
 
     fn append(ctx: [*c][*c]const c.br_x509_class, buf: [*c]const u8, len: usize) callconv(.C) void {
@@ -248,6 +480,11 @@ const CertificateValidator = extern struct {
         //     len,
         // });
         self.x509_minimal.vtable.?.*.append.?(&self.x509_minimal.vtable, buf, len);
+
+        self.temp_buffer.write(buf[0..len]) catch {
+            std.debug.warn("too much memory!\n", .{});
+            self.current_cert_valid = false;
+        };
     }
 
     fn end_cert(ctx: [*c][*c]const c.br_x509_class) callconv(.C) void {
@@ -256,6 +493,39 @@ const CertificateValidator = extern struct {
         //     ctx,
         // });
         self.x509_minimal.vtable.?.*.end_cert.?(&self.x509_minimal.vtable);
+
+        if (self.current_cert_valid) {
+            const cert = DERCertificate{
+                .allocator = self.allocator,
+                .data = std.mem.dupe(self.allocator, u8, self.temp_buffer.constSpan()) catch return, // sad, but no other choise
+            };
+            errdefer cert.deinit();
+
+            self.certificates.append(cert) catch return;
+        }
+    }
+
+    fn saveCertificates(self: Self, folder: []const u8) !void {
+        var trust_store_dir = try std.fs.cwd().openDir("trust-store", .{ .access_sub_paths = true, .iterate = false });
+        defer trust_store_dir.close();
+
+        trust_store_dir.makeDir(folder) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        var server_dir = try trust_store_dir.openDir(folder, .{ .access_sub_paths = true, .iterate = false });
+        defer server_dir.close();
+
+        for (self.certificates.items) |cert, index| {
+            var name_buf: [64]u8 = undefined;
+            var name = try std.fmt.bufPrint(&name_buf, "cert-{}.der", .{index});
+
+            var file = try server_dir.createFile(name, .{ .exclusive = false });
+            defer file.close();
+
+            try file.writeAll(cert.data);
+        }
     }
 
     fn end_chain(ctx: [*c][*c]const c.br_x509_class) callconv(.C) c_uint {
@@ -265,10 +535,19 @@ const CertificateValidator = extern struct {
         //     ctx,
         //     err,
         // });
-        if (err == c.BR_ERR_X509_NOT_TRUSTED) {
-            // FUCK THIS!
-            // TODO: This should'nt be done actually, but we can override the trust chain with this and just return the
-            // pubkey anyways :D
+
+        // std.debug.warn("Received {} certificates for {}!\n", .{
+        //     self.certificates.items.len,
+        //     self.server_name,
+        // });
+
+        // Patch the error code and just accept in case of ignoring this error.
+        if (err == c.BR_ERR_X509_NOT_TRUSTED and self.options.ignore_untrusted) {
+            return 0;
+        }
+
+        // Patch the error code and just accept in case of ignoring this error.
+        if (err == c.BR_ERR_X509_BAD_SERVER_NAME and self.options.ignore_hostname_mismatch) {
             return 0;
         }
 
@@ -286,6 +565,15 @@ const CertificateValidator = extern struct {
         // });
         return pkey;
     }
+
+    pub fn extractPublicKey(self: Self, allocator: *std.mem.Allocator) !PublicKey {
+        var usages: c_uint = 0;
+        const pkey = self.x509_minimal.vtable.?.*.get_pkey.?(&self.x509_minimal.vtable, usages);
+        std.debug.assert(pkey != null);
+        var key = try PublicKey.fromX509(allocator, pkey.*);
+        key.usages = usages;
+        return key;
+    }
 };
 
 pub const Client = struct {
@@ -295,17 +583,24 @@ pub const Client = struct {
     x509_custom: CertificateValidator,
     iobuf: [c.BR_SSL_BUFSIZE_BIDI]u8,
 
-    pub fn init(tac: TrustAnchorCollection) Self {
+    pub fn init(allocator: *std.mem.Allocator, tac: TrustAnchorCollection) Self {
         var ctx = Self{
             .client = undefined,
             .x509_custom = .{
                 .x509_minimal = undefined,
+
+                .allocator = allocator,
+                .certificates = std.ArrayList(DERCertificate).init(allocator),
             },
             .iobuf = undefined,
         };
-        c.br_ssl_client_init_full(&ctx.client, &ctx.x509_custom.x509_minimal, tac.items.ptr, tac.items.len);
+        c.br_ssl_client_init_full(&ctx.client, &ctx.x509_custom.x509_minimal, tac.items.items.ptr, tac.items.items.len);
 
         return ctx;
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.x509_custom.deinit();
     }
 
     pub fn relocate(self: *Self) void {
@@ -429,82 +724,81 @@ fn Vector(comptime T: type) type {
     };
 }
 
-fn convertToTrustAnchor(allocator: *std.mem.Allocator, cert: c.br_x509_certificate) !c.br_x509_trust_anchor {
-    var dc: c.br_x509_decoder_context = undefined;
-
-    var vdn = std.ArrayList(u8).init(allocator);
-    defer vdn.deinit();
-
-    c.br_x509_decoder_init(&dc, appendToBuffer, &vdn);
-    c.br_x509_decoder_push(&dc, cert.data, cert.data_len);
-
-    const private_key: *c.br_x509_pkey = if (@ptrCast(?*c.br_x509_pkey, c.br_x509_decoder_get_pkey(&dc))) |pk|
-        pk
-    else
-        return convertError(c.br_x509_decoder_last_error(&dc));
-
-    var ta = c.br_x509_trust_anchor{
-        .dn = undefined,
-        .flags = 0,
-        .pkey = undefined,
+const asn1 = struct {
+    const Type = enum {
+        bit_string,
+        boolean,
+        integer,
+        @"null",
+        object_identifier,
+        octet_string,
+        bmpstring,
+        ia5string,
+        printable_string,
+        utf8_string,
+        sequence,
+        set,
     };
 
-    if (c.br_x509_decoder_isCA(&dc) != 0) {
-        ta.flags |= c.BR_X509_TA_CA;
+    const Value = union(Type) {
+        bit_string: void,
+        boolean: void,
+        integer: Integer,
+        @"null": void,
+        object_identifier: void,
+        octet_string: void,
+        bmpstring: void,
+        ia5string: void,
+        printable_string: void,
+        utf8_string: void,
+        sequence: void,
+        set: void,
+    };
+
+    const Integer = struct {
+        value: []u8,
+    };
+
+    const Sequence = struct {
+        items: []Value,
+    };
+
+    fn encode(buffer: ?[]u8, value: Value) !usize {
+        //
     }
+};
 
-    switch (private_key.key_type) {
-        c.BR_KEYTYPE_RSA => {
-            var n = try std.mem.dupe(allocator, u8, private_key.key.rsa.n[0..private_key.key.rsa.nlen]);
-            errdefer allocator.free(n);
+fn FixedGrowBuffer(comptime T: type, comptime max_len: usize) type {
+    return struct {
+        const Self = @This();
 
-            var e = try std.mem.dupe(allocator, u8, private_key.key.rsa.e[0..private_key.key.rsa.elen]);
-            errdefer allocator.free(e);
+        offset: usize,
+        buffer: [max_len]T,
 
-            ta.pkey = .{
-                .key_type = c.BR_KEYTYPE_RSA,
-                .key = .{
-                    .rsa = .{
-                        .n = n.ptr,
-                        .nlen = n.len,
-                        .e = e.ptr,
-                        .elen = e.len,
-                    },
-                },
+        pub fn init() Self {
+            return Self{
+                .offset = 0,
+                .buffer = undefined,
             };
-        },
-        c.BR_KEYTYPE_EC => {
-            var q = try std.mem.dupe(allocator, u8, private_key.key.ec.q[0..private_key.key.ec.qlen]);
-            errdefer allocator.free(q);
+        }
 
-            ta.pkey = .{
-                .key_type = c.BR_KEYTYPE_EC,
-                .key = .{
-                    .ec = .{
-                        .curve = private_key.key.ec.curve,
-                        .q = q.ptr,
-                        .qlen = q.len,
-                    },
-                },
-            };
-        },
-        else => return error.UnsupportedKeyType,
-    }
+        pub fn reset(self: *Self) void {
+            self.offset = 0;
+        }
 
-    errdefer switch (private_key.key_type) {
-        c.BR_KEYTYPE_RSA => {
-            allocator.free(ta.pkey.key.rsa.n[0..ta.pkey.key.rsa.nlen]);
-            allocator.free(ta.pkey.key.rsa.e[0..ta.pkey.key.rsa.elen]);
-        },
-        c.BR_KEYTYPE_EC => allocator.free(ta.pkey.key.ec.q[0..ta.pkey.key.ec.qlen]),
-        else => unreachable,
+        pub fn write(self: *Self, data: []const T) error{OutOfMemory}!void {
+            if (self.offset + data.len > self.buffer.len)
+                return error.OutOfMemory;
+            std.mem.copy(T, self.buffer[self.offset..], data);
+            self.offset += data.len;
+        }
+
+        pub fn span(self: *Self) []T {
+            return self.buffer[0..self.offset];
+        }
+
+        pub fn constSpan(self: *Self) []const T {
+            return self.buffer[0..self.offset];
+        }
     };
-
-    const dn = vdn.toOwnedSlice();
-    ta.dn = .{
-        .data = dn.ptr,
-        .len = dn.len,
-    };
-
-    return ta;
 }
