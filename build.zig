@@ -50,9 +50,7 @@ fn addBearSSL(module: *std.build.LibExeObjStep, target: std.zig.CrossTarget) voi
     for (bearssl_sources) |srcfile| {
         module.addCSourceFile(srcfile, &[_][]const u8{
             "-Wall",
-            // needed as BearSSL invokes UB, but we want the library to work anyways
-            // I know this is maybe insecure!
-            "-fno-sanitize=undefined",
+            "-DBR_LE_UNALIGNED=0", // this prevent BearSSL from using undefined behaviour when doing potential unaligned access
         });
     }
 

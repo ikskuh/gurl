@@ -21,7 +21,7 @@ A [Gemini](https://gemini.circumlunar.space/) command line interface similar to 
 - [x] Use [XDG directories](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html)
 - [ ] Implement windows port
   - [ ] Port `zig-network` to windows
-  - [ ] Implement correct config directory locating for windows
+  - [x] Implement correct config directory locating for windows
 
 ## Dependencies
 
