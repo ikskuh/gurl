@@ -22,6 +22,7 @@ pub fn build(b: *std.build.Builder) !void {
         module.addPackagePath("network", "./zig-network/network.zig");
         module.addPackagePath("uri", "./zig-uri/uri.zig");
         module.addPackagePath("args", "./zig-args/args.zig");
+        module.addPackagePath("known-folders", "./known-folders/known-folders.zig");
     }
 
     if (mode != .Debug) {
@@ -49,6 +50,9 @@ fn addBearSSL(module: *std.build.LibExeObjStep, target: std.zig.CrossTarget) voi
     for (bearssl_sources) |srcfile| {
         module.addCSourceFile(srcfile, &[_][]const u8{
             "-Wall",
+            // needed as BearSSL invokes UB, but we want the library to work anyways
+            // I know this is maybe insecure!
+            "-fno-sanitize=undefined",
         });
     }
 

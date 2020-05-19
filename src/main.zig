@@ -1,8 +1,10 @@
 const std = @import("std");
 const network = @import("network");
-const ssl = @import("bearssl.zig");
 const uri = @import("uri");
 const args_parse = @import("args");
+const known_folder = @import("known-folders");
+
+const ssl = @import("bearssl.zig");
 
 const app_name = "gurl";
 
@@ -22,75 +24,15 @@ pub fn main() !u8 {
     var path_arena = std.heap.ArenaAllocator.init(generic_allocator);
     defer path_arena.deinit();
 
-    var config_root = switch (std.builtin.os.tag) {
-        // Use %APPDATA%  on windows
-        .windows => @compileError("not supported yet"),
-        else => std.process.getEnvVarOwned(&path_arena.allocator, "XDG_CONFIG_HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => blk: {
-                const home_dir = std.process.getEnvVarOwned(&path_arena.allocator, "HOME") catch {
-                    try stderr.writeAll("Failed to get $HOME variable!\n");
-                    return 1;
-                };
-
-                break :blk try std.fs.path.join(&path_arena.allocator, &[_][]const u8{ home_dir, ".config" });
-            },
-            else => return err,
-        },
+    var config_root = if (try known_folder.getPath(generic_allocator, .roaming_configuration)) |path|
+        path
+    else {
+        try stderr.writeAll("Could not get the root configuration folder!\n");
+        return 1;
     };
+    defer generic_allocator.free(config_root);
 
     const app_config_file_name = try std.fs.path.join(&path_arena.allocator, &[_][]const u8{ config_root, app_name, "config.json" });
-
-    const app_trust_store_dir = try std.fs.path.join(&path_arena.allocator, &[_][]const u8{ config_root, app_name, "trust-store" });
-
-    var app_trust_store: ?std.fs.Dir = std.fs.cwd().openDir(app_trust_store_dir, .{ .access_sub_paths = true, .iterate = true }) catch |open_dir_err| switch (open_dir_err) {
-        error.FileNotFound => blk: {
-            var backing_buffer: [10]u8 = undefined;
-
-            const create_dir = while (true) {
-                try stderr.print("Trust store directory {} not found. Do you want to create it? [Y/N] ", .{
-                    app_trust_store_dir,
-                });
-
-                const answer = if (try stdin.readUntilDelimiterOrEof(&backing_buffer, '\n')) |a|
-                    a
-                else {
-                    break :blk null;
-                };
-
-                if (std.mem.eql(u8, answer, "Y") or std.mem.eql(u8, answer, "y")) {
-                    break true;
-                }
-                if (std.mem.eql(u8, answer, "N") or std.mem.eql(u8, answer, "n")) {
-                    break false;
-                }
-            } else unreachable;
-
-            if (create_dir) {
-                const dir = std.fs.cwd().makeOpenPath(app_trust_store_dir, .{ .access_sub_paths = true, .iterate = true }) catch |err| {
-                    try stderr.print("Could not create directory {}: {}\n", .{ app_trust_store_dir, err });
-                    return 1;
-                };
-
-                break :blk dir;
-            } else {
-                break :blk null;
-            }
-        },
-        else => {
-            try stderr.print("Could not access {}: {}\n", .{ app_trust_store_dir, open_dir_err });
-            return 1;
-        },
-    };
-    defer if (app_trust_store) |*dir| {
-        dir.close();
-    };
-
-    if (app_trust_store != null) {
-        std.debug.warn("trust store: \"{}\"\n", .{app_trust_store_dir});
-    } else {
-        std.debug.warn("trust store: none\n", .{});
-    }
-    std.debug.warn("config file: \"{}\"\n", .{app_config_file_name});
 
     var cli = try args_parse.parseForCurrentProcess(struct {
         @"remote-name": bool = false,
@@ -149,6 +91,51 @@ pub fn main() !u8 {
         cli.options.output = file_name;
     }
 
+    const app_trust_store_dir = try std.fs.path.join(&path_arena.allocator, &[_][]const u8{ config_root, app_name, "trust-store" });
+
+    var app_trust_store: ?std.fs.Dir = std.fs.cwd().openDir(cli.options.@"trust-store" orelse app_trust_store_dir, .{ .access_sub_paths = true, .iterate = true }) catch |open_dir_err| switch (open_dir_err) {
+        error.FileNotFound => blk: {
+            var backing_buffer: [10]u8 = undefined;
+
+            const create_dir = while (true) {
+                try stderr.print("Trust store directory {} not found. Do you want to create it? [Y/N] ", .{
+                    app_trust_store_dir,
+                });
+
+                const answer = if (try stdin.readUntilDelimiterOrEof(&backing_buffer, '\n')) |a|
+                    a
+                else {
+                    break :blk null;
+                };
+
+                if (std.mem.eql(u8, answer, "Y") or std.mem.eql(u8, answer, "y")) {
+                    break true;
+                }
+                if (std.mem.eql(u8, answer, "N") or std.mem.eql(u8, answer, "n")) {
+                    break false;
+                }
+            } else unreachable;
+
+            if (create_dir) {
+                const dir = std.fs.cwd().makeOpenPath(app_trust_store_dir, .{ .access_sub_paths = true, .iterate = true }) catch |err| {
+                    try stderr.print("Could not create directory {}: {}\n", .{ app_trust_store_dir, err });
+                    return 1;
+                };
+
+                break :blk dir;
+            } else {
+                break :blk null;
+            }
+        },
+        else => {
+            try stderr.print("Could not access {}: {}\n", .{ app_trust_store_dir, open_dir_err });
+            return 1;
+        },
+    };
+    defer if (app_trust_store) |*dir| {
+        dir.close();
+    };
+
     if (cli.options.@"accept-host" and app_trust_store == null) {
         try stderr.writeAll("--accept-host cannot store server public key: trust store does not exist.\n");
         return 1;
@@ -192,7 +179,7 @@ pub fn main() !u8 {
         }
     }
 
-    const options = RequestOptions{
+    const request_options = RequestOptions{
         .memory_limit = 100 * mebi_bytes,
         .verification = switch (cli.options.trust) {
             // no verification for
@@ -204,7 +191,7 @@ pub fn main() !u8 {
         },
     };
 
-    var response = requestRaw(generic_allocator, cli.positionals[0], options) catch |err| switch (err) {
+    var response = requestRaw(generic_allocator, cli.positionals[0], request_options) catch |err| switch (err) {
         error.MissingAuthority => {
             try stderr.writeAll("The url does not contain a host name!\n");
             return 1;
@@ -230,7 +217,8 @@ pub fn main() !u8 {
     defer response.free(generic_allocator);
 
     // Add server to trust store if requested
-    if (cli.options.@"accept-host") {
+    // when tofu and no verification means we see the host for the first time → accept the cert as well
+    if (cli.options.@"accept-host" or (cli.options.trust == .tofu and request_options.verification == .none)) {
 
         // app_trust_store is not null, we verified this above!
         // parsed_url.host is not null, we already used it for requesting
@@ -301,6 +289,15 @@ pub fn main() !u8 {
         },
         .untrustedCertificate => {
             try stdout.writeAll("Server is not trusted. Use --accept-host to add the server to your trust store!\n");
+            return 1;
+        },
+        .badSignature => {
+            try stderr.print(
+                "Signature mismatch! The host {} could not be verified!\n",
+                .{
+                    parsed_url.host,
+                },
+            );
             return 1;
         },
         else => try stdout.print("unimplemented response type: {}\n", .{response}),
@@ -430,6 +427,7 @@ pub const Response = struct {
 
         switch (self.content) {
             .untrustedCertificate => {},
+            .badSignature => {},
             .input => |input| {
                 allocator.free(input.prompt);
             },
@@ -453,6 +451,9 @@ pub const Response = struct {
         /// When the server is not known or trusted yet, it just returns a nil value showing that
         /// the server could be reached, but we don't trust it.
         untrustedCertificate: void,
+
+        /// The server responded with a different signature than the one stored in the trust store.
+        badSignature: void,
 
         /// Status Code = 1*
         input: Input,
@@ -633,6 +634,10 @@ pub fn requestRaw(allocator: *std.mem.Allocator, url: []const u8, options: Reque
     request_response catch |err| switch (err) {
         error.X509_NOT_TRUSTED => {
             response.content = Response.Content{ .untrustedCertificate = {} };
+            return response;
+        },
+        error.BAD_SIGNATURE => {
+            response.content = Response.Content{ .badSignature = {} };
             return response;
         },
         error.X509_BAD_SERVER_NAME => return error.BadServerName,
