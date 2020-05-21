@@ -7,6 +7,8 @@ The <url> must have the scheme gemini://.
 -O, --remote-name          - Similar to --output, but will use the file name
                              specified in the URL. Note that this option will
                              override a file name set with --output!
+-r, --raw                  - Send a raw request and returning debug information
+                             instead of handling redirects and such.
 -t, --trust <level>        - Sets the trust level for certifactes. Allowed
                              values are:
                              all  - ignore the server certificate and just 

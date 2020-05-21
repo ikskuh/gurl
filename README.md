@@ -12,9 +12,12 @@ A [Gemini](https://gemini.circumlunar.space/) command line interface similar to 
 - [x] DNS resolving
 - [ ] MIME parsing
 - [ ] All of the correct heading handling
-  - [ ] Following redirects
-  - [ ] …
-- [x] TOFU (trust on first use) for SSL connections
+  - [x] Follow absolute redirects
+  - [ ] Follow relative redirects
+  - [ ] Pretty-printing and guidance messages for failed requests 
+- [ ] TOFU (trust on first use) for SSL connections
+  - [x] Implement primitive TOFU (store public key, not certificate)
+  - [ ] Implement correct TOFU (trust on first use) for SSL connections
 - [ ] Client certificates
   - [ ] temporary cert
   - [ ] permanent cert
@@ -51,6 +54,19 @@ Give the user control over their system and make configuration easy.
 ### Future Plans
 
 Correctly adhere to XDG standards and use `xdg-open`
+
+## TOFU Notes
+
+Current implementation just stores the public key of the server and
+not the certificate with fingerprint and everything
+
+> That certificate's fingerprint and expiry date are saved in a
+persistent database (like the .known_hosts file for SSH), associated
+with the server's hostname.
+
+## Client Certificate Process
+
+- Wait for specification update
 
 ## Tools
 

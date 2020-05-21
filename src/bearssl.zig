@@ -1,6 +1,7 @@
 const std = @import("std");
 
-const c = @cImport({
+// Export C for advanced interfacing
+pub const c = @cImport({
     @cInclude("bearssl.h");
 });
 
@@ -421,245 +422,207 @@ pub const TrustAnchorCollection = struct {
     }
 };
 
-/// Custom x509 engine that uses the minimal engine and ignores missing trust.
-/// First step in TOFU direction
-pub const CertificateValidator = struct {
-    const Self = @This();
+// The "full" profile supports all implemented cipher suites.
+//
+// Rationale for suite order, from most important to least
+// important rule:
+//
+// -- Don't use 3DES if AES or ChaCha20 is available.
+// -- Try to have Forward Secrecy (ECDHE suite) if possible.
+// -- When not using Forward Secrecy, ECDH key exchange is
+//    better than RSA key exchange (slightly more expensive on the
+//    client, but much cheaper on the server, and it implies smaller
+//    messages).
+// -- ChaCha20+Poly1305 is better than AES/GCM (faster, smaller code).
+// -- GCM is better than CCM and CBC. CCM is better than CBC.
+// -- CCM is preferable over CCM_8 (with CCM_8, forgeries may succeed
+//    with probability 2^(-64)).
+// -- AES-128 is preferred over AES-256 (AES-128 is already
+//    strong enough, and AES-256 is 40% more expensive).
+//
+const cypher_suites = [_]u16{
+    c.BR_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+    c.BR_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    c.BR_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    c.BR_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    c.BR_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+    c.BR_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    c.BR_TLS_ECDHE_ECDSA_WITH_AES_128_CCM,
+    c.BR_TLS_ECDHE_ECDSA_WITH_AES_256_CCM,
+    c.BR_TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8,
+    c.BR_TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8,
+    c.BR_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+    c.BR_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+    c.BR_TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
+    c.BR_TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
+    c.BR_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+    c.BR_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+    c.BR_TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+    c.BR_TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+    c.BR_TLS_ECDH_ECDSA_WITH_AES_128_GCM_SHA256,
+    c.BR_TLS_ECDH_RSA_WITH_AES_128_GCM_SHA256,
+    c.BR_TLS_ECDH_ECDSA_WITH_AES_256_GCM_SHA384,
+    c.BR_TLS_ECDH_RSA_WITH_AES_256_GCM_SHA384,
+    c.BR_TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA256,
+    c.BR_TLS_ECDH_RSA_WITH_AES_128_CBC_SHA256,
+    c.BR_TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA384,
+    c.BR_TLS_ECDH_RSA_WITH_AES_256_CBC_SHA384,
+    c.BR_TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA,
+    c.BR_TLS_ECDH_RSA_WITH_AES_128_CBC_SHA,
+    c.BR_TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA,
+    c.BR_TLS_ECDH_RSA_WITH_AES_256_CBC_SHA,
+    c.BR_TLS_RSA_WITH_AES_128_GCM_SHA256,
+    c.BR_TLS_RSA_WITH_AES_256_GCM_SHA384,
+    c.BR_TLS_RSA_WITH_AES_128_CCM,
+    c.BR_TLS_RSA_WITH_AES_256_CCM,
+    c.BR_TLS_RSA_WITH_AES_128_CCM_8,
+    c.BR_TLS_RSA_WITH_AES_256_CCM_8,
+    c.BR_TLS_RSA_WITH_AES_128_CBC_SHA256,
+    c.BR_TLS_RSA_WITH_AES_256_CBC_SHA256,
+    c.BR_TLS_RSA_WITH_AES_128_CBC_SHA,
+    c.BR_TLS_RSA_WITH_AES_256_CBC_SHA,
+    c.BR_TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA,
+    c.BR_TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
+    c.BR_TLS_ECDH_ECDSA_WITH_3DES_EDE_CBC_SHA,
+    c.BR_TLS_ECDH_RSA_WITH_3DES_EDE_CBC_SHA,
+    c.BR_TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+};
 
-    const Options = struct {
-        ignore_untrusted: bool = false,
-        ignore_hostname_mismatch: bool = false,
+// All hash functions are activated.
+// Note: the X.509 validation engine will nonetheless refuse to
+// validate signatures that use MD5 as hash function.
+//
+fn getHashClasses() [6]*const c.br_hash_class {
+    return .{
+        &c.br_md5_vtable,
+        &c.br_sha1_vtable,
+        &c.br_sha224_vtable,
+        &c.br_sha256_vtable,
+        &c.br_sha384_vtable,
+        &c.br_sha512_vtable,
     };
+}
 
-    const class = c.br_x509_class{
-        .context_size = @sizeOf(Self),
-        .start_chain = start_chain,
-        .start_cert = start_cert,
-        .append = append,
-        .end_cert = end_cert,
-        .end_chain = end_chain,
-        .get_pkey = get_pkey,
-    };
+pub const x509 = struct {
+    pub const Minimal = struct {
+        const Self = @This();
 
-    vtable: *const c.br_x509_class = &class,
-    x509_minimal: c.br_x509_minimal_context,
-    x509_known_key: ?c.br_x509_knownkey_context,
+        engine: c.br_x509_minimal_context,
 
-    allocator: *std.mem.Allocator,
-    certificates: std.ArrayList(DERCertificate),
-
-    current_cert_valid: bool = undefined,
-    temp_buffer: FixedGrowBuffer(u8, 2048) = undefined,
-
-    server_name: ?[]const u8 = null,
-
-    options: Options = Options{},
-
-    pub fn deinit(self: Self) void {
-        for (self.certificates.items) |cert| {
-            cert.deinit();
-        }
-        self.certificates.deinit();
-
-        if (self.server_name) |name| {
-            self.allocator.free(name);
-        }
-    }
-
-    fn returnTypeOf(comptime Class: type, comptime name: []const u8) type {
-        return @typeInfo(std.meta.Child(std.meta.fieldInfo(Class, name).field_type)).Fn.return_type.?;
-    }
-
-    fn virtualCall(object: var, comptime name: []const u8, args: var) returnTypeOf(c.br_x509_class, name) {
-        return @call(.{}, @field(object.vtable.?.*, name).?, .{&object.vtable} ++ args);
-    }
-
-    fn proxyCall(self: var, comptime name: []const u8, args: var) returnTypeOf(c.br_x509_class, name) {
-        if (self.x509_known_key) |*kc| {
-            return virtualCall(kc, name, args);
-        } else {
-            return virtualCall(&self.x509_minimal, name, args);
-        }
-    }
-
-    fn start_chain(ctx: [*c][*c]const c.br_x509_class, server_name: [*c]const u8) callconv(.C) void {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
-        // std.debug.warn("start_chain({0}, {1})\n", .{
-        //     ctx,
-        //     std.mem.spanZ(server_name),
-        // });
-
-        self.proxyCall("start_chain", .{server_name});
-
-        for (self.certificates.items) |cert| {
-            cert.deinit();
-        }
-        self.certificates.shrink(0);
-
-        if (self.server_name) |name| {
-            self.allocator.free(name);
-        }
-        self.server_name = null;
-
-        self.server_name = std.mem.dupe(self.allocator, u8, std.mem.spanZ(server_name)) catch null;
-    }
-
-    fn start_cert(ctx: [*c][*c]const c.br_x509_class, length: u32) callconv(.C) void {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
-        // std.debug.warn("start_cert({0}, {1})\n", .{
-        //     ctx,
-        //     length,
-        // });
-        self.proxyCall("start_cert", .{length});
-
-        self.temp_buffer = FixedGrowBuffer(u8, 2048).init();
-        self.current_cert_valid = true;
-    }
-
-    fn append(ctx: [*c][*c]const c.br_x509_class, buf: [*c]const u8, len: usize) callconv(.C) void {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
-        // std.debug.warn("append({0}, {1}, {2})\n", .{
-        //     ctx,
-        //     buf,
-        //     len,
-        // });
-        self.proxyCall("append", .{ buf, len });
-
-        self.temp_buffer.write(buf[0..len]) catch {
-            std.debug.warn("too much memory!\n", .{});
-            self.current_cert_valid = false;
-        };
-    }
-
-    fn end_cert(ctx: [*c][*c]const c.br_x509_class) callconv(.C) void {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
-        // std.debug.warn("end_cert({})\n", .{
-        //     ctx,
-        // });
-        self.proxyCall("end_cert", .{});
-
-        if (self.current_cert_valid) {
-            const cert = DERCertificate{
-                .allocator = self.allocator,
-                .data = std.mem.dupe(self.allocator, u8, self.temp_buffer.constSpan()) catch return, // sad, but no other choise
+        pub fn init(tac: TrustAnchorCollection) Self {
+            var self = Self{
+                .engine = undefined,
             };
-            errdefer cert.deinit();
+            const xc = &self.engine;
 
-            self.certificates.append(cert) catch return;
-        }
-    }
+            // X.509 engine uses SHA-256 to hash certificate DN (for
+            // comparisons).
+            //
+            c.br_x509_minimal_init(xc, &c.br_sha256_vtable, tac.items.items.ptr, tac.items.items.len);
 
-    fn end_chain(ctx: [*c][*c]const c.br_x509_class) callconv(.C) c_uint {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const c.br_x509_class, ctx));
+            c.br_x509_minimal_set_rsa(xc, c.br_rsa_pkcs1_vrfy_get_default());
+            c.br_x509_minimal_set_ecdsa(xc, &c.br_ec_all_m31, c.br_ecdsa_i31_vrfy_asn1);
 
-        const err = self.proxyCall("end_chain", .{});
-        // std.debug.warn("end_chain({}) → {}\n", .{
-        //     ctx,
-        //     err,
-        // });
+            // Set supported hash functions, for the SSL engine and for the
+            // X.509 engine.
+            const hash_classes = getHashClasses();
+            var id: usize = c.br_md5_ID;
+            while (id <= c.br_sha512_ID) : (id += 1) {
+                const hc = hash_classes[id - 1];
+                c.br_x509_minimal_set_hash(xc, @intCast(c_int, id), hc);
+            }
 
-        // std.debug.warn("Received {} certificates for {}!\n", .{
-        //     self.certificates.items.len,
-        //     self.server_name,
-        // });
-
-        // Patch the error code and just accept in case of ignoring this error.
-        if (err == c.BR_ERR_X509_NOT_TRUSTED and self.options.ignore_untrusted) {
-            return 0;
+            return self;
         }
 
-        // Patch the error code and just accept in case of ignoring this error.
-        if (err == c.BR_ERR_X509_BAD_SERVER_NAME and self.options.ignore_hostname_mismatch) {
-            return 0;
+        fn getEngine(self: *Self) **const c.br_x509_class {
+            return &self.engine.vtable;
+        }
+    };
+
+    pub const KnownKey = struct {
+        const Self = @This();
+
+        engine: c.br_x509_knownkey_context,
+
+        pub fn init(key: PublicKey, allowKeyExchange: bool, allowSigning: bool) Self {
+            return KnownKey{
+                .engine = c.br_x509_knownkey_context{
+                    .vtable = &c.br_x509_knownkey_vtable,
+                    .pkey = key.toX509(),
+                    .usages = (key.usages orelse 0) |
+                        (if (allowKeyExchange) @as(c_uint, c.BR_KEYTYPE_KEYX) else 0) |
+                        (if (allowSigning) @as(c_uint, c.BR_KEYTYPE_SIGN) else 0), // always allow a stored key for key-exchange
+                },
+            };
         }
 
-        return err;
-    }
-
-    fn get_pkey(ctx: [*c]const [*c]const c.br_x509_class, usages: [*c]c_uint) callconv(.C) [*c]const c.br_x509_pkey {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(*const *const c.br_x509_class, ctx));
-
-        const pkey = self.proxyCall("get_pkey", .{usages});
-        // std.debug.warn("get_pkey({}, {}) → {}\n", .{
-        //     ctx,
-        //     usages,
-        //     pkey,
-        // });
-        return pkey;
-    }
-
-    fn saveCertificates(self: Self, folder: []const u8) !void {
-        var trust_store_dir = try std.fs.cwd().openDir("trust-store", .{ .access_sub_paths = true, .iterate = false });
-        defer trust_store_dir.close();
-
-        trust_store_dir.makeDir(folder) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        var server_dir = try trust_store_dir.openDir(folder, .{ .access_sub_paths = true, .iterate = false });
-        defer server_dir.close();
-
-        for (self.certificates.items) |cert, index| {
-            var name_buf: [64]u8 = undefined;
-            var name = try std.fmt.bufPrint(&name_buf, "cert-{}.der", .{index});
-
-            var file = try server_dir.createFile(name, .{ .exclusive = false });
-            defer file.close();
-
-            try file.writeAll(cert.data);
+        fn getEngine(self: *Self) **const c.br_x509_class {
+            return &self.engine.vtable;
         }
-    }
-
-    pub fn extractPublicKey(self: Self, allocator: *std.mem.Allocator) !PublicKey {
-        var usages: c_uint = 0;
-        const pkey = self.proxyCall("get_pkey", .{usages});
-        std.debug.assert(pkey != null);
-        var key = try PublicKey.fromX509(allocator, pkey.*);
-        key.usages = usages;
-        return key;
-    }
+    };
 };
 
 pub const Client = struct {
     const Self = @This();
 
     client: c.br_ssl_client_context,
-    x509: CertificateValidator,
     iobuf: [c.BR_SSL_BUFSIZE_BIDI]u8,
 
-    pub fn init(allocator: *std.mem.Allocator, tac: TrustAnchorCollection) Self {
+    pub fn init(engine: **const c.br_x509_class) Self {
         var ctx = Self{
             .client = undefined,
-            .x509 = .{
-                .x509_minimal = undefined,
-                .x509_known_key = null,
-
-                .allocator = allocator,
-                .certificates = std.ArrayList(DERCertificate).init(allocator),
-            },
             .iobuf = undefined,
         };
-        c.br_ssl_client_init_full(&ctx.client, &ctx.x509.x509_minimal, tac.items.items.ptr, tac.items.items.len);
+
+        const cc = &ctx.client;
+
+        // Reset client context and set supported versions from TLS-1.0
+        // to TLS-1.2 (inclusive).
+        //
+        c.br_ssl_client_zero(cc);
+        c.br_ssl_engine_set_versions(&cc.eng, c.BR_TLS10, c.BR_TLS12);
+
+        // Set suites and asymmetric crypto implementations. We use the
+        // "i31" code for RSA (it is somewhat faster than the "i32"
+        // implementation).
+        // TODO: change that when better implementations are made available.
+
+        c.br_ssl_engine_set_suites(&cc.eng, &cypher_suites[0], cypher_suites.len);
+        c.br_ssl_client_set_default_rsapub(cc);
+        c.br_ssl_engine_set_default_rsavrfy(&cc.eng);
+        c.br_ssl_engine_set_default_ecdsa(&cc.eng);
+
+        // Set supported hash functions, for the SSL engine and for the
+        // X.509 engine.
+        const hash_classes = getHashClasses();
+        var id: c_int = c.br_md5_ID;
+        while (id <= c.br_sha512_ID) : (id += 1) {
+            const hc = hash_classes[@intCast(usize, id - 1)];
+            c.br_ssl_engine_set_hash(&cc.eng, id, hc);
+        }
+
+        // Set the PRF implementations.
+        c.br_ssl_engine_set_prf10(&cc.eng, c.br_tls10_prf);
+        c.br_ssl_engine_set_prf_sha256(&cc.eng, c.br_tls12_sha256_prf);
+        c.br_ssl_engine_set_prf_sha384(&cc.eng, c.br_tls12_sha384_prf);
+
+        // Symmetric encryption. We use the "default" implementations
+        // (fastest among constant-time implementations).
+        c.br_ssl_engine_set_default_aes_cbc(&cc.eng);
+        c.br_ssl_engine_set_default_aes_ccm(&cc.eng);
+        c.br_ssl_engine_set_default_aes_gcm(&cc.eng);
+        c.br_ssl_engine_set_default_des_cbc(&cc.eng);
+        c.br_ssl_engine_set_default_chapol(&cc.eng);
+
+        // Link the X.509 engine in the SSL engine.
+        c.br_ssl_engine_set_x509(&cc.eng, @ptrCast([*c][*c]const c.br_x509_class, engine));
 
         return ctx;
     }
 
-    pub fn deinit(self: *Self) void {
-        self.x509.deinit();
-    }
-
     pub fn relocate(self: *Self) void {
-        c.br_ssl_engine_set_x509(&self.client.eng, @ptrCast([*c][*c]const c.br_x509_class, &self.x509.vtable));
         c.br_ssl_engine_set_buffer(&self.client.eng, &self.iobuf, self.iobuf.len, 1);
-    }
-
-    pub fn setToKnownKeyAuth(self: *Self, key: PublicKey) void {
-        self.x509.x509_known_key = c.br_x509_knownkey_context{
-            .vtable = &c.br_x509_knownkey_vtable,
-            .pkey = key.toX509(),
-            .usages = (key.usages orelse 0) | c.BR_KEYTYPE_KEYX | c.BR_KEYTYPE_SIGN, // always allow a stored key for key-exchange
-        };
     }
 
     pub fn reset(self: *Self, host: [:0]const u8, resumeSession: bool) !void {
@@ -821,38 +784,3 @@ const asn1 = struct {
         //
     }
 };
-
-fn FixedGrowBuffer(comptime T: type, comptime max_len: usize) type {
-    return struct {
-        const Self = @This();
-
-        offset: usize,
-        buffer: [max_len]T,
-
-        pub fn init() Self {
-            return Self{
-                .offset = 0,
-                .buffer = undefined,
-            };
-        }
-
-        pub fn reset(self: *Self) void {
-            self.offset = 0;
-        }
-
-        pub fn write(self: *Self, data: []const T) error{OutOfMemory}!void {
-            if (self.offset + data.len > self.buffer.len)
-                return error.OutOfMemory;
-            std.mem.copy(T, self.buffer[self.offset..], data);
-            self.offset += data.len;
-        }
-
-        pub fn span(self: *Self) []T {
-            return self.buffer[0..self.offset];
-        }
-
-        pub fn constSpan(self: *Self) []const T {
-            return self.buffer[0..self.offset];
-        }
-    };
-}
