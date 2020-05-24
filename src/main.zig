@@ -1,10 +1,10 @@
 const std = @import("std");
-const network = @import("network");
-const uri = @import("uri");
-const args_parse = @import("args");
+const network = @import("zig-network");
+const uri = @import("zig-uri");
+const args_parse = @import("zig-args");
 const known_folder = @import("known-folders");
 
-const ssl = @import("bearssl.zig");
+const ssl = @import("zig-bearssl");
 
 const app_name = "gurl";
 
@@ -594,7 +594,10 @@ pub fn requestRaw(allocator: *std.mem.Allocator, url: []const u8, options: Reque
 
     // std.debug.warn("ssl initialized.\n", .{});
 
-    var ssl_stream = ssl.Stream.init(ssl_context.getEngine(), socket.internal);
+    var tcp_in = socket.inStream();
+    var tcp_out = socket.outStream();
+
+    var ssl_stream = ssl.initStream(ssl_context.getEngine(), &tcp_in, &tcp_out);
     defer if (ssl_stream.close()) {} else |err| {
         std.debug.warn("error when closing the stream: {}\n", .{err});
     };
@@ -812,7 +815,7 @@ pub const CertificateValidator = struct {
         .get_pkey = get_pkey,
     };
 
-    vtable: *const ssl.c.br_x509_class = &class,
+    vtable: [*c]const ssl.c.br_x509_class = &class,
     x509: union(enum) {
         minimal: ssl.c.br_x509_minimal_context,
         known_key: ssl.c.br_x509_knownkey_context,
@@ -896,8 +899,15 @@ pub const CertificateValidator = struct {
         };
     }
 
+    fn fromPointer(ctx: var) if (@typeInfo(@TypeOf(ctx)).Pointer.is_const) *const Self else *Self {
+        return if (@typeInfo(@TypeOf(ctx)).Pointer.is_const)
+            return @fieldParentPtr(Self, "vtable", @ptrCast(*const [*c]const ssl.c.br_x509_class, ctx))
+        else
+            return @fieldParentPtr(Self, "vtable", @ptrCast(*[*c]const ssl.c.br_x509_class, ctx));
+    }
+
     fn start_chain(ctx: [*c][*c]const ssl.c.br_x509_class, server_name: [*c]const u8) callconv(.C) void {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const ssl.c.br_x509_class, ctx));
+        const self = fromPointer(ctx);
         // std.debug.warn("start_chain({0}, {1})\n", .{
         //     ctx,
         //     std.mem.spanZ(server_name),
@@ -919,7 +929,7 @@ pub const CertificateValidator = struct {
     }
 
     fn start_cert(ctx: [*c][*c]const ssl.c.br_x509_class, length: u32) callconv(.C) void {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const ssl.c.br_x509_class, ctx));
+        const self = fromPointer(ctx);
         // std.debug.warn("start_cert({0}, {1})\n", .{
         //     ctx,
         //     length,
@@ -931,7 +941,7 @@ pub const CertificateValidator = struct {
     }
 
     fn append(ctx: [*c][*c]const ssl.c.br_x509_class, buf: [*c]const u8, len: usize) callconv(.C) void {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const ssl.c.br_x509_class, ctx));
+        const self = fromPointer(ctx);
         // std.debug.warn("append({0}, {1}, {2})\n", .{
         //     ctx,
         //     buf,
@@ -946,7 +956,7 @@ pub const CertificateValidator = struct {
     }
 
     fn end_cert(ctx: [*c][*c]const ssl.c.br_x509_class) callconv(.C) void {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const ssl.c.br_x509_class, ctx));
+        const self = fromPointer(ctx);
         // std.debug.warn("end_cert({})\n", .{
         //     ctx,
         // });
@@ -964,7 +974,7 @@ pub const CertificateValidator = struct {
     }
 
     fn end_chain(ctx: [*c][*c]const ssl.c.br_x509_class) callconv(.C) c_uint {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(**const ssl.c.br_x509_class, ctx));
+        const self = fromPointer(ctx);
 
         const err = self.proxyCall("end_chain", .{});
         // std.debug.warn("end_chain({}) → {}\n", .{
@@ -991,7 +1001,7 @@ pub const CertificateValidator = struct {
     }
 
     fn get_pkey(ctx: [*c]const [*c]const ssl.c.br_x509_class, usages: [*c]c_uint) callconv(.C) [*c]const ssl.c.br_x509_pkey {
-        const self = @fieldParentPtr(Self, "vtable", @ptrCast(*const *const ssl.c.br_x509_class, ctx));
+        const self = fromPointer(ctx);
 
         const pkey = self.proxyCall("get_pkey", .{usages});
         // std.debug.warn("get_pkey({}, {}) → {}\n", .{
@@ -1034,7 +1044,7 @@ pub const CertificateValidator = struct {
         return key;
     }
 
-    fn getEngine(self: *Self) **const ssl.c.br_x509_class {
+    fn getEngine(self: *Self) *[*c]const ssl.c.br_x509_class {
         return &self.vtable;
     }
 };
