@@ -104,11 +104,13 @@ pub fn main() !u8 {
                     app_trust_store_dir,
                 });
 
-                const answer = if (try stdin.readUntilDelimiterOrEof(&backing_buffer, '\n')) |a|
+                const answer = std.mem.trim(u8, if (try stdin.readUntilDelimiterOrEof(&backing_buffer, '\n')) |a|
                     a
                 else {
                     break :blk null;
-                };
+                }, "\r");
+
+                std.debug.warn("{X}\n", .{answer});
 
                 if (std.mem.eql(u8, answer, "Y") or std.mem.eql(u8, answer, "y")) {
                     break true;
@@ -560,25 +562,8 @@ pub fn requestRaw(allocator: *std.mem.Allocator, url: []const u8, options: Reque
 
     const hostname_z = try std.mem.dupeZ(&temp_allocator.allocator, u8, parsed_url.host.?);
 
-    const address_list = try std.net.getAddressList(&temp_allocator.allocator, hostname_z, parsed_url.port orelse 1965);
-    defer address_list.deinit();
-
-    var socket = for (address_list.addrs) |addr| {
-        var ep = network.EndPoint.fromSocketAddress(&addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-            error.UnsupportedAddressFamily => continue,
-            else => return err,
-        };
-
-        var sock = try network.Socket.create(ep.address, .tcp);
-        errdefer sock.close();
-
-        sock.connect(ep) catch {
-            sock.close();
-            continue;
-        };
-
-        break sock;
-    } else return error.CouldNotConnect;
+    var socket = try network.connectToHost(&temp_allocator.allocator, hostname_z, parsed_url.port orelse 1965, .tcp);
+    defer socket.close();
 
     var x509 = switch (options.verification) {
         .trust_anchor => |list| CertificateValidator.initTrustAnchor(allocator, list),

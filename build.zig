@@ -7,8 +7,10 @@ pub fn build(b: *std.build.Builder) !void {
     const mode = b.standardReleaseOptions();
     const target = b.standardTargetOptions(.{
         .default_target = try std.zig.CrossTarget.parse(.{
-            .arch_os_abi = "native-native-gnu.2.25..2.25", // we need at least glibc 2.25 for getentropy
-            // .arch_os_abi = "native-native-musl", // preferrable, but doesn't work?!
+            .arch_os_abi = if (std.builtin.os.tag == .windows)
+                "native-native-gnu" // on windows, use gnu by default
+            else
+                "native-linux-musl", // glibc has some problems by-default, use musl instead
         }),
     });
 
