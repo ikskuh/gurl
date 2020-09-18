@@ -121,10 +121,11 @@ pub fn main() !u8 {
             } else unreachable;
 
             if (create_dir) {
-                const dir = std.fs.cwd().makeOpenPath(app_trust_store_dir, .{ .access_sub_paths = true, .iterate = true }) catch |err| {
+                std.fs.cwd().makePath(app_trust_store_dir) catch |err| {
                     try stderr.print("Could not create directory {}: {}\n", .{ app_trust_store_dir, err });
                     return 1;
                 };
+                const dir = try std.fs.cwd().openDir(app_trust_store_dir, .{ .access_sub_paths = true, .iterate = true });
 
                 break :blk dir;
             } else {
