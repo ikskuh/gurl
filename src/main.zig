@@ -236,6 +236,8 @@ pub fn main() !u8 {
             else => return create_file_err,
         };
 
+        try stderr.writeAll("Server was added to trust store and is now trusted!\n");
+
         errdefer app_trust_store.?.deleteFile(parsed_url.host.?) catch |err| {
             stderr.print("Failed to delete server public key {}: Please delete this file by hand or you may not be able to connect to this server in the future!\n", .{
                 parsed_url.host.?,
@@ -292,7 +294,9 @@ pub fn main() !u8 {
             }
         },
         .untrustedCertificate => {
-            try stdout.writeAll("Server is not trusted. Use --accept-host to add the server to your trust store!\n");
+            if (!cli.options.@"accept-host") {
+                try stderr.writeAll("Server is not trusted. Use --accept-host to add the server to your trust store!\n");
+            }
             return 1;
         },
         .badSignature => {
