@@ -587,8 +587,8 @@ pub fn requestRaw(allocator: *std.mem.Allocator, url: []const u8, options: Reque
 
     // std.debug.warn("ssl initialized.\n", .{});
 
-    var tcp_in = socket.inStream();
-    var tcp_out = socket.outStream();
+    var tcp_in = socket.reader();
+    var tcp_out = socket.writer();
 
     var ssl_stream = ssl.initStream(ssl_context.getEngine(), &tcp_in, &tcp_out);
     defer if (ssl_stream.close()) {} else |err| {
@@ -881,18 +881,18 @@ pub const CertificateValidator = struct {
         return @typeInfo(std.meta.Child(std.meta.fieldInfo(Class, name).field_type)).Fn.return_type.?;
     }
 
-    fn virtualCall(object: var, comptime name: []const u8, args: var) returnTypeOf(ssl.c.br_x509_class, name) {
+    fn virtualCall(object: anytype, comptime name: []const u8, args: anytype) returnTypeOf(ssl.c.br_x509_class, name) {
         return @call(.{}, @field(object.vtable.?.*, name).?, .{&object.vtable} ++ args);
     }
 
-    fn proxyCall(self: var, comptime name: []const u8, args: var) returnTypeOf(ssl.c.br_x509_class, name) {
+    fn proxyCall(self: anytype, comptime name: []const u8, args: anytype) returnTypeOf(ssl.c.br_x509_class, name) {
         return switch (self.x509) {
             .minimal => |*m| virtualCall(m, name, args),
             .known_key => |*k| virtualCall(k, name, args),
         };
     }
 
-    fn fromPointer(ctx: var) if (@typeInfo(@TypeOf(ctx)).Pointer.is_const) *const Self else *Self {
+    fn fromPointer(ctx: anytype) if (@typeInfo(@TypeOf(ctx)).Pointer.is_const) *const Self else *Self {
         return if (@typeInfo(@TypeOf(ctx)).Pointer.is_const)
             return @fieldParentPtr(Self, "vtable", @ptrCast(*const [*c]const ssl.c.br_x509_class, ctx))
         else
