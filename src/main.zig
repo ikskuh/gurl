@@ -95,7 +95,10 @@ pub fn main() !u8 {
 
     const app_trust_store_dir = try std.fs.path.join(&path_arena.allocator, &[_][]const u8{ config_root, app_name, "trust-store" });
 
-    var app_trust_store: ?std.fs.Dir = std.fs.cwd().openDir(cli.options.@"trust-store" orelse app_trust_store_dir, .{ .access_sub_paths = true, .iterate = true }) catch |open_dir_err| switch (open_dir_err) {
+    var app_trust_store: ?std.fs.Dir = std.fs.cwd().openDir(
+        cli.options.@"trust-store" orelse app_trust_store_dir,
+        .{ .access_sub_paths = true, .iterate = true },
+    ) catch |open_dir_err| switch (open_dir_err) {
         error.FileNotFound => blk: {
             var backing_buffer: [10]u8 = undefined;
 

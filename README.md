@@ -23,8 +23,9 @@ A [Gemini](https://gemini.circumlunar.space/) command line interface similar to 
   - [ ] permanent cert
 - [x] Use [XDG directories](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html)
 - [ ] Implement windows port
-  - [ ] Port `zig-network` to windows
+  - [x] Port `zig-network` to windows
   - [x] Implement correct config directory locating for windows
+  - [ ] Trust Anchor support for windows
 
 ## Dependencies
 
