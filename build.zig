@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const packages = @import("lib/packages.zig");
-const bearssl = @import("lib/zig-bearssl/bearssl.zig");
+const bearssl = @import("lib/zig-bearssl/src/lib.zig");
 
 pub fn build(b: *std.build.Builder) !void {
     const mode = b.standardReleaseOptions();

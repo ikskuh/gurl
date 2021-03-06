@@ -36,7 +36,7 @@ const packages = struct { // begin list
     // begin pkg
     const @"zig-bearssl" = std.build.Pkg{
         .name = "zig-bearssl",
-        .path = "lib/zig-bearssl/bearssl.zig",
+        .path = "lib/zig-bearssl/src/lib.zig",
         .dependencies = null,
     };
     // end pkg

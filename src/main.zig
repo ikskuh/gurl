@@ -15,9 +15,9 @@ const TrustLevel = enum {
 };
 
 pub fn main() !u8 {
-    const stdout = std.io.getStdOut().outStream();
-    const stderr = std.io.getStdErr().outStream();
-    const stdin = std.io.getStdIn().inStream();
+    const stdout = std.io.getStdOut().writer();
+    const stderr = std.io.getStdErr().writer();
+    const stdin = std.io.getStdIn().reader();
 
     const generic_allocator = std.heap.page_allocator; // THIS IS INEFFICIENT AS FUCK
 
@@ -59,7 +59,7 @@ pub fn main() !u8 {
 
     if (cli.options.help or cli.positionals.len != 1) {
         try stderr.print(
-            "{} [--help] [--remote-name] [--output <file>] <url>\n",
+            "{s} [--help] [--remote-name] [--output <file>] <url>\n",
             .{std.fs.path.basename(cli.executable_name.?)},
         );
         try stderr.writeAll(@embedFile("helpmessage.txt"));
@@ -68,7 +68,7 @@ pub fn main() !u8 {
     }
 
     const parsed_url = uri.parse(cli.positionals[0]) catch {
-        try stderr.print("{} is not a valid URL!\n", .{cli.positionals[0]});
+        try stderr.print("{s} is not a valid URL!\n", .{cli.positionals[0]});
         return 1;
     };
     if (parsed_url.host == null) {
@@ -103,7 +103,7 @@ pub fn main() !u8 {
             var backing_buffer: [10]u8 = undefined;
 
             const create_dir = while (true) {
-                try stderr.print("Trust store directory {} not found. Do you want to create it? [Y/N] ", .{
+                try stderr.print("Trust store directory {s} not found. Do you want to create it? [Y/N] ", .{
                     app_trust_store_dir,
                 });
 
@@ -113,7 +113,7 @@ pub fn main() !u8 {
                     break :blk null;
                 }, "\r");
 
-                std.debug.warn("{X}\n", .{answer});
+                std.debug.warn("{}\n", .{std.fmt.fmtSliceHexUpper(answer)});
 
                 if (std.mem.eql(u8, answer, "Y") or std.mem.eql(u8, answer, "y")) {
                     break true;
@@ -125,7 +125,7 @@ pub fn main() !u8 {
 
             if (create_dir) {
                 std.fs.cwd().makePath(app_trust_store_dir) catch |err| {
-                    try stderr.print("Could not create directory {}: {}\n", .{ app_trust_store_dir, err });
+                    try stderr.print("Could not create directory {s}: {}\n", .{ app_trust_store_dir, err });
                     return 1;
                 };
                 const dir = try std.fs.cwd().openDir(app_trust_store_dir, .{ .access_sub_paths = true, .iterate = true });
@@ -136,7 +136,7 @@ pub fn main() !u8 {
             }
         },
         else => {
-            try stderr.print("Could not access {}: {}\n", .{ app_trust_store_dir, open_dir_err });
+            try stderr.print("Could not access {s}: {}\n", .{ app_trust_store_dir, open_dir_err });
             return 1;
         },
     };
@@ -156,7 +156,7 @@ pub fn main() !u8 {
         var file = try std.fs.cwd().openFile(cli.options.@"trust-anchor", .{ .read = true, .write = false });
         defer file.close();
 
-        const pem_text = try file.inStream().readAllAlloc(generic_allocator, 1 << 20); // 1 MB
+        const pem_text = try file.reader().readAllAlloc(generic_allocator, 1 << 20); // 1 MB
         defer generic_allocator.free(pem_text);
 
         try trust_anchors.appendFromPEM(pem_text);
@@ -243,7 +243,7 @@ pub fn main() !u8 {
         try stderr.writeAll("Server was added to trust store and is now trusted!\n");
 
         errdefer app_trust_store.?.deleteFile(parsed_url.host.?) catch |err| {
-            stderr.print("Failed to delete server public key {}: Please delete this file by hand or you may not be able to connect to this server in the future!\n", .{
+            stderr.print("Failed to delete server public key {s}: Please delete this file by hand or you may not be able to connect to this server in the future!\n", .{
                 parsed_url.host.?,
             }) catch {};
         };
@@ -257,19 +257,19 @@ pub fn main() !u8 {
         // Line 4: key usages
         // All values (n,e,q) are hex-encoded
 
-        var outstream = file.outStream();
+        var outstream = file.writer();
 
         switch (response.public_key.key) {
             .rsa => |rsa| {
                 try outstream.writeAll("RSA\n");
-                try outstream.print("{X}\n", .{rsa.n});
-                try outstream.print("{X}\n", .{rsa.e});
+                try outstream.print("{}\n", .{std.fmt.fmtSliceHexUpper(rsa.n)});
+                try outstream.print("{}\n", .{std.fmt.fmtSliceHexUpper(rsa.e)});
             },
             .ec => |ec| {
                 const usages = response.public_key.usages orelse @as(c_uint, 0);
                 try outstream.writeAll("EC");
                 try outstream.print("{X}\n", .{ec.curve});
-                try outstream.print("{X}\n", .{ec.q});
+                try outstream.print("{}\n", .{std.fmt.fmtSliceHexUpper(ec.q)});
             },
         }
         const usages = response.public_key.usages orelse @as(c_uint, 0);
@@ -280,7 +280,7 @@ pub fn main() !u8 {
         .success => |body| {
 
             // what are we doing with the mime type here?
-            try stderr.print("MIME: {0}\n", .{body.mime});
+            try stderr.print("MIME: {s}\n", .{body.mime});
 
             if (cli.options.output) |file_name| {
                 var outfile = try std.fs.cwd().createFile(file_name, .{ .exclusive = false });
@@ -289,7 +289,7 @@ pub fn main() !u8 {
                 try outfile.writeAll(body.data);
             } else {
                 if (!std.mem.startsWith(u8, body.mime, "text/") and !cli.options.@"force-binary-on-stdout") {
-                    try stderr.print("Will not write data of type {} to stdout unless --force-binary-on-stdout is used.\n", .{
+                    try stderr.print("Will not write data of type {s} to stdout unless --force-binary-on-stdout is used.\n", .{
                         body.mime,
                     });
                     return 1;
@@ -305,14 +305,14 @@ pub fn main() !u8 {
         },
         .badSignature => {
             try stderr.print(
-                "Signature mismatch! The host {} could not be verified!\n",
+                "Signature mismatch! The host {s} could not be verified!\n",
                 .{
                     parsed_url.host,
                 },
             );
             return 1;
         },
-        else => try stdout.print("unimplemented response type: {}\n", .{response}),
+        else => try stdout.print("unimplemented response type: {s}\n", .{response}),
     }
 
     return 0;
@@ -333,7 +333,7 @@ fn convertHexToArray(allocator: *std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 fn parsePublicKeyFile(allocator: *std.mem.Allocator, file: std.fs.File) !ssl.PublicKey {
-    const instream = file.inStream();
+    const instream = file.reader();
 
     // RSA is supported up to 4096 bits, so 512 byte.
     var backing_buffer: [520]u8 = undefined;
@@ -534,7 +534,7 @@ pub const Response = struct {
         message: []const u8,
     };
 };
-pub const ResponseType = @TagType(Response.Content);
+pub const ResponseType = std.meta.TagType(Response.Content);
 
 const empty_trust_anchor_set = ssl.TrustAnchorCollection.init(std.testing.failing_allocator);
 
@@ -595,12 +595,12 @@ pub fn requestRaw(allocator: *std.mem.Allocator, url: []const u8, options: Reque
         std.debug.warn("error when closing the stream: {}\n", .{err});
     };
 
-    const in = ssl_stream.inStream();
-    const out = ssl_stream.outStream();
+    const in = ssl_stream.reader();
+    const out = ssl_stream.writer();
 
     var work_buf: [1500]u8 = undefined;
 
-    const request_str = try std.fmt.bufPrint(&work_buf, "{}\r\n", .{url});
+    const request_str = try std.fmt.bufPrint(&work_buf, "{s}\r\n", .{url});
 
     const request_response = out.writeAll(request_str);
 
@@ -766,7 +766,7 @@ pub fn request(allocator: *std.mem.Allocator, url: []const u8, options: RequestO
 
         switch (response.content) {
             .redirect => |redirection| {
-                std.debug.warn("iteration {} → {}\n", .{
+                std.debug.warn("iteration {} → {s}\n", .{
                     redirection_count,
                     redirection.target,
                 });
@@ -877,15 +877,15 @@ pub const CertificateValidator = struct {
         };
     }
 
-    fn returnTypeOf(comptime Class: type, comptime name: []const u8) type {
+    fn returnTypeOf(comptime Class: type, comptime name: std.meta.FieldEnum(Class)) type {
         return @typeInfo(std.meta.Child(std.meta.fieldInfo(Class, name).field_type)).Fn.return_type.?;
     }
 
-    fn virtualCall(object: anytype, comptime name: []const u8, args: anytype) returnTypeOf(ssl.c.br_x509_class, name) {
-        return @call(.{}, @field(object.vtable.?.*, name).?, .{&object.vtable} ++ args);
+    fn virtualCall(object: anytype, comptime name: std.meta.FieldEnum(@TypeOf(object.vtable.?.*)), args: anytype) returnTypeOf(ssl.c.br_x509_class, name) {
+        return @call(.{}, @field(object.vtable.?.*, @tagName(name)).?, .{&object.vtable} ++ args);
     }
 
-    fn proxyCall(self: anytype, comptime name: []const u8, args: anytype) returnTypeOf(ssl.c.br_x509_class, name) {
+    fn proxyCall(self: anytype, comptime name: @TypeOf(.literal), args: anytype) returnTypeOf(ssl.c.br_x509_class, name) {
         return switch (self.x509) {
             .minimal => |*m| virtualCall(m, name, args),
             .known_key => |*k| virtualCall(k, name, args),
@@ -906,12 +906,12 @@ pub const CertificateValidator = struct {
         //     std.mem.spanZ(server_name),
         // });
 
-        self.proxyCall("start_chain", .{server_name});
+        self.proxyCall(.start_chain, .{server_name});
 
         for (self.certificates.items) |cert| {
             cert.deinit();
         }
-        self.certificates.shrink(0);
+        self.certificates.shrinkRetainingCapacity(0);
 
         if (self.server_name) |name| {
             self.allocator.free(name);
@@ -927,7 +927,7 @@ pub const CertificateValidator = struct {
         //     ctx,
         //     length,
         // });
-        self.proxyCall("start_cert", .{length});
+        self.proxyCall(.start_cert, .{length});
 
         self.temp_buffer = FixedGrowBuffer(u8, 2048).init();
         self.current_cert_valid = true;
@@ -940,7 +940,7 @@ pub const CertificateValidator = struct {
         //     buf,
         //     len,
         // });
-        self.proxyCall("append", .{ buf, len });
+        self.proxyCall(.append, .{ buf, len });
 
         self.temp_buffer.write(buf[0..len]) catch {
             std.debug.warn("too much memory!\n", .{});
@@ -953,7 +953,7 @@ pub const CertificateValidator = struct {
         // std.debug.warn("end_cert({})\n", .{
         //     ctx,
         // });
-        self.proxyCall("end_cert", .{});
+        self.proxyCall(.end_cert, .{});
 
         if (self.current_cert_valid) {
             const cert = ssl.DERCertificate{
@@ -969,7 +969,7 @@ pub const CertificateValidator = struct {
     fn end_chain(ctx: [*c][*c]const ssl.c.br_x509_class) callconv(.C) c_uint {
         const self = fromPointer(ctx);
 
-        const err = self.proxyCall("end_chain", .{});
+        const err = self.proxyCall(.end_chain, .{});
         // std.debug.warn("end_chain({}) → {}\n", .{
         //     ctx,
         //     err,
@@ -996,7 +996,7 @@ pub const CertificateValidator = struct {
     fn get_pkey(ctx: [*c]const [*c]const ssl.c.br_x509_class, usages: [*c]c_uint) callconv(.C) [*c]const ssl.c.br_x509_pkey {
         const self = fromPointer(ctx);
 
-        const pkey = self.proxyCall("get_pkey", .{usages});
+        const pkey = self.proxyCall(.get_pkey, .{usages});
         // std.debug.warn("get_pkey({}, {}) → {}\n", .{
         //     ctx,
         //     usages,
@@ -1030,7 +1030,7 @@ pub const CertificateValidator = struct {
 
     pub fn extractPublicKey(self: Self, allocator: *std.mem.Allocator) !ssl.PublicKey {
         var usages: c_uint = 0;
-        const pkey = self.proxyCall("get_pkey", .{usages});
+        const pkey = self.proxyCall(.get_pkey, .{usages});
         std.debug.assert(pkey != null);
         var key = try ssl.PublicKey.fromX509(allocator, pkey.*);
         key.usages = usages;
@@ -1083,7 +1083,7 @@ test "loading system certs" {
     var file = try std.fs.cwd().openFile("/etc/ssl/cert.pem", .{ .read = true, .write = false });
     defer file.close();
 
-    const pem_text = try file.inStream().readAllAlloc(std.testing.allocator, 1 << 20); // 1 MB
+    const pem_text = try file.reader().readAllAlloc(std.testing.allocator, 1 << 20); // 1 MB
     defer std.testing.allocator.free(pem_text);
 
     var trust_anchors = ssl.TrustAnchorCollection.init(std.testing.allocator);
