@@ -2,7 +2,7 @@ const std = @import("std");
 
 const builtin = @import("builtin");
 
-const bearssl = @import("lib/zig-bearssl/src/lib.zig");
+const bearssl = @import("zig-bearssl");
 
 pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
@@ -37,14 +37,15 @@ pub fn build(b: *std.Build) !void {
     const zig_network_dep = b.dependency("zig-network", .{});
     const zig_args_dep = b.dependency("zig-args", .{});
     const known_folders_dep = b.dependency("known-folders", .{});
+    const bearssl_dep = b.dependency("zig-bearssl", .{});
 
     const zig_network = zig_network_dep.module("network");
     const zig_args = zig_args_dep.module("args");
     const known_folders = known_folders_dep.module("known-folders");
-    const zig_bearssl = b.createModule(.{ .source_file = .{ .path = "lib/zig-bearssl/src/lib.zig" } });
+    const zig_bearssl = bearssl_dep.module("bearssl");
 
     for ([_]*std.Build.Step.Compile{ gurl, gurl_test }) |module| {
-        bearssl.linkBearSSL("lib/zig-bearssl/", module, target);
+        bearssl.bearssl.linkBearSSL(bearssl_dep.builder.build_root.path orelse ".", module, target);
         module.addModule("zig-network", zig_network);
         module.addModule("zig-args", zig_args);
         module.addModule("known-folders", known_folders);
