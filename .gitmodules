@@ -1,3 +1,0 @@
-[submodule "lib/zig-bearssl"]
-	path = lib/zig-bearssl
-	url = https://github.com/MasterQ32/zig-bearssl
