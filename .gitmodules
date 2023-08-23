@@ -1,15 +1,3 @@
-[submodule "lib/zig-network"]
-	path = lib/zig-network
-	url = https://github.com/MasterQ32/zig-network
-[submodule "lib/zig-args"]
-	path = lib/zig-args
-	url = https://github.com/MasterQ32/zig-args
-[submodule "lib/known-folders"]
-	path = lib/known-folders
-	url = https://github.com/ziglibs/known-folders
 [submodule "lib/zig-bearssl"]
 	path = lib/zig-bearssl
 	url = https://github.com/MasterQ32/zig-bearssl
-[submodule "lib/zig-uri"]
-	path = lib/zig-uri
-	url = https://github.com/MasterQ32/zig-uri

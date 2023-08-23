@@ -1,38 +1,63 @@
 const std = @import("std");
 
-const packages = @import("lib/packages.zig");
+const builtin = @import("builtin");
+
 const bearssl = @import("lib/zig-bearssl/src/lib.zig");
 
-pub fn build(b: *std.build.Builder) !void {
-    const mode = b.standardReleaseOptions();
+pub fn build(b: *std.Build) !void {
+    const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{
         .default_target = try std.zig.CrossTarget.parse(.{
-            .arch_os_abi = if (std.builtin.os.tag == .windows)
+            .arch_os_abi = if (builtin.os.tag == .windows)
                 "native-native-gnu" // on windows, use gnu by default
             else
                 "native-linux-musl", // glibc has some problems by-default, use musl instead
         }),
     });
 
-    const gurl = b.addExecutable("gurl", "src/main.zig");
-    const gurl_test = b.addTest("src/main.zig");
+    const gurl = b.addExecutable(.{
+        .name = "gurl",
+        .root_source_file = .{
+            .path = "src/main.zig",
+        },
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
 
-    for ([_]*std.build.LibExeObjStep{ gurl, gurl_test }) |module| {
-        module.setTarget(target);
-        module.setBuildMode(mode);
-        module.linkLibC();
+    const gurl_test = b.addTest(.{
+        .root_source_file = .{
+            .path = "src/main.zig",
+        },
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
 
-        packages.addAllTo(module);
+    const zig_network_dep = b.dependency("zig-network", .{});
+    const zig_args_dep = b.dependency("zig-args", .{});
+    const known_folders_dep = b.dependency("known-folders", .{});
+
+    const zig_network = zig_network_dep.module("network");
+    const zig_args = zig_args_dep.module("args");
+    const known_folders = known_folders_dep.module("known-folders");
+    const zig_bearssl = b.createModule(.{ .source_file = .{ .path = "lib/zig-bearssl/src/lib.zig" } });
+
+    for ([_]*std.Build.Step.Compile{ gurl, gurl_test }) |module| {
         bearssl.linkBearSSL("lib/zig-bearssl/", module, target);
+        module.addModule("zig-network", zig_network);
+        module.addModule("zig-args", zig_args);
+        module.addModule("known-folders", known_folders);
+        module.addModule("zig-bearssl", zig_bearssl);
     }
 
-    if (mode != .Debug) {
+    if (optimize != .Debug) {
         gurl.strip = true;
     }
 
-    gurl.install();
+    b.installArtifact(gurl);
 
-    const gurl_exec = gurl.run();
+    const gurl_exec = b.addRunArtifact(gurl);
     gurl_exec.addArgs(&[_][]const u8{
         "gemini://gemini.circumlunar.space/",
     });
