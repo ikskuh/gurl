@@ -15,7 +15,7 @@
             .hash = "1220ff9d897573586bce7d0beb2552e77376d56b02d91a7dbafa3f2dfa26f148dc4a",
         },
         .@"zig-bearssl" = .{
-            .url = "https://github.com/der-teufel-programming/zig-bearssl/archive/0dda16e2efdf4a42f89077992292e1cca7efaa68.tar.gz",
+            .url = "https://github.com/MasterQ32/zig-bearssl/archive/42cac648593ce784944769dba52343871ac7824c.tar.gz",
             .hash = "122058226b6884a522feb58c5f11a119d4846726c374c8a930ade0ce26c723bd525a",
         },
     },
