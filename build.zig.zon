@@ -1,0 +1,18 @@
+.{
+    .name = "gurl",
+    .version = "0.0.1",
+    .dependencies = .{
+        .@"zig-args" = .{
+            .url = "https://github.com/MasterQ32/zig-args/archive/bb2eced8ddf28114b3a1ff761c2d80b90b1a61e2.tar.gz",
+            .hash = "12208556082c280af264ca2a174fd04fc7a35f865bfe59e2c61f4a977bf7a65063e4",
+        },
+        .@"known-folders" = .{
+            .url = "https://github.com/ziglibs/known-folders/archive/fa75e1bc672952efa0cf06160bbd942b47f6d59b.tar.gz",
+            .hash = "122048992ca58a78318b6eba4f65c692564be5af3b30fbef50cd4abeda981b2e7fa5",
+        },
+        .@"zig-network" = .{
+            .url = "https://github.com/MasterQ32/zig-network/archive/830821a8736ca1bf7662b9c5fec9bfe9f0066ad3.tar.gz",
+            .hash = "1220ff9d897573586bce7d0beb2552e77376d56b02d91a7dbafa3f2dfa26f148dc4a",
+        },
+    },
+}
